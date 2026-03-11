@@ -1,0 +1,122 @@
+{
+  "timestamp": "2026-03-11T15:00:00Z",
+  "exchange": "hyperliquid",
+  "symbol": "BTC",
+  "current_price": 101250.0,
+  "candles_5m": [
+    {
+      "ts": "2026-03-11T14:40:00Z",
+      "open": 100810.0,
+      "high": 100990.0,
+      "low": 100760.0,
+      "close": 100940.0,
+      "volume": 138.5
+    },
+    {
+      "ts": "2026-03-11T14:45:00Z",
+      "open": 100940.0,
+      "high": 101180.0,
+      "low": 100900.0,
+      "close": 101120.0,
+      "volume": 149.1
+    },
+    {
+      "ts": "2026-03-11T14:50:00Z",
+      "open": 101120.0,
+      "high": 101310.0,
+      "low": 101040.0,
+      "close": 101260.0,
+      "volume": 153.2
+    },
+    {
+      "ts": "2026-03-11T14:55:00Z",
+      "open": 101260.0,
+      "high": 101340.0,
+      "low": 101160.0,
+      "close": 101250.0,
+      "volume": 127.4
+    }
+  ],
+  "candles_15m": [
+    {
+      "ts": "2026-03-11T14:00:00Z",
+      "open": 100220.0,
+      "high": 100860.0,
+      "low": 100100.0,
+      "close": 100790.0,
+      "volume": 401.0
+    },
+    {
+      "ts": "2026-03-11T14:15:00Z",
+      "open": 100790.0,
+      "high": 101090.0,
+      "low": 100680.0,
+      "close": 100940.0,
+      "volume": 418.2
+    },
+    {
+      "ts": "2026-03-11T14:30:00Z",
+      "open": 100940.0,
+      "high": 101340.0,
+      "low": 100900.0,
+      "close": 101250.0,
+      "volume": 429.4
+    }
+  ],
+  "clusters_above": [
+    {
+      "side": "above",
+      "price": 101900.0,
+      "size": 185.0,
+      "shape": "single_wall"
+    },
+    {
+      "side": "above",
+      "price": 102350.0,
+      "size": 120.0,
+      "shape": "staircase"
+    },
+    {
+      "side": "above",
+      "price": 102900.0,
+      "size": 90.0,
+      "shape": "diffuse"
+    }
+  ],
+  "clusters_below": [
+    {
+      "side": "below",
+      "price": 100950.0,
+      "size": 70.0,
+      "shape": "staircase"
+    },
+    {
+      "side": "below",
+      "price": 100400.0,
+      "size": 55.0,
+      "shape": "single_wall"
+    },
+    {
+      "side": "below",
+      "price": 99800.0,
+      "size": 40.0,
+      "shape": "diffuse"
+    }
+  ],
+  "atr": 420.0,
+  "heatmap_path": "heatmaps/sample-btc-20260311T150000Z.png",
+  "map_quality": "clean",
+  "sweep": {
+    "touched_cluster_side": null,
+    "wick_only": false,
+    "body_reclaimed": false
+  },
+  "position": {
+    "side": "flat",
+    "entry_price": null,
+    "quantity": 0.0,
+    "open_orders": 0,
+    "consecutive_losses_today": 0
+  }
+}
+
