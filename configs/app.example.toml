@@ -1,0 +1,9 @@
+dex_name = "hyperliquid"
+symbol = "BTC"
+heatmap_source = "external"
+llm_provider = "openai"
+llm_model = "gpt-5-mini"
+risk_per_trade_pct = 0.35
+base_leverage = 6.0
+max_leverage = 10.0
+
