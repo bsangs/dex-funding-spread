@@ -11,6 +11,7 @@ from dex_llm.executor.safety import (
     RateLimitBudgeter,
     ValidationResult,
     build_deterministic_cloid,
+    extract_role_from_cloid,
 )
 
 __all__ = [
@@ -18,6 +19,7 @@ __all__ = [
     "AssetMetadata",
     "BudgetStatus",
     "ClockDriftError",
+    "extract_role_from_cloid",
     "HyperliquidExchangeExecutor",
     "NonceManager",
     "PaperExecutor",

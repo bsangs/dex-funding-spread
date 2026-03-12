@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from time import perf_counter
 from typing import Protocol
 
+from dex_llm.executor.safety import extract_role_from_cloid
 from dex_llm.market import compute_atr
 from dex_llm.models import (
     Candle,
@@ -22,7 +23,6 @@ from dex_llm.models import (
     MarginMode,
     MarketFrame,
     OrderBookSnapshot,
-    OrderRole,
     OrderState,
     PositionState,
     PriceLevel,
@@ -553,17 +553,7 @@ class LiveFrameBuilder:
         return streak
 
     def _to_live_order(self, order: HyperliquidFrontendOrder) -> LiveOrderState:
-        role = None
-        if order.cloid is not None:
-            lowered = order.cloid.lower()
-            if "entry" in lowered:
-                role = OrderRole.ENTRY
-            elif "take_profit_1" in lowered or "tp1" in lowered:
-                role = OrderRole.TAKE_PROFIT_1
-            elif "take_profit_2" in lowered or "tp2" in lowered:
-                role = OrderRole.TAKE_PROFIT_2
-            elif "stop_loss" in lowered or lowered.endswith("sl") or ":sl" in lowered:
-                role = OrderRole.STOP_LOSS
+        role = extract_role_from_cloid(order.cloid)
         return LiveOrderState(
             coin=order.coin,
             side=order.side,
@@ -575,7 +565,7 @@ class LiveFrameBuilder:
             oid=order.oid,
             cloid=order.cloid,
             status=OrderState.OPEN,
-            role=role or OrderRole.UNKNOWN,
+            role=role,
             timestamp=order.timestamp,
             trigger_price=order.trigger_price,
         )

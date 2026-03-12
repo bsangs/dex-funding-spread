@@ -297,6 +297,19 @@ class HyperliquidExchangeExecutor:
                     )
                 )
                 continue
+            if self._can_keep(current, desired):
+                receipts.append(
+                    self._receipt(
+                        symbol=symbol,
+                        cloid=current.cloid or desired.cloid,
+                        action="keep",
+                        decision=ReconciliationDecision.KEEP,
+                        success=True,
+                        status=current.status,
+                        message="existing order already matches desired state",
+                    )
+                )
+                continue
             if self._can_modify(current, desired):
                 receipts.append(
                     self.modify_order(
@@ -519,6 +532,16 @@ class HyperliquidExchangeExecutor:
             and current_is_buy == desired_is_buy
             and current_trigger == desired_trigger
         )
+
+    @staticmethod
+    def _can_keep(current: LiveOrderState, desired: DesiredOrder) -> bool:
+        if not HyperliquidExchangeExecutor._can_modify(current, desired):
+            return False
+        if abs(current.limit_price - desired.price) > 1e-9:
+            return False
+        if abs(current.size - desired.size) > 1e-9:
+            return False
+        return True
 
     def _set_expires_after(self, expires_after: int | None) -> None:
         self.exchange.set_expires_after(expires_after)

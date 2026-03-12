@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 
+from dex_llm.cli import _build_executor
+from dex_llm.config import AppSettings
 from dex_llm.executor.live import DesiredOrder, HyperliquidExchangeExecutor
 from dex_llm.executor.nonces import NonceManager
 from dex_llm.executor.safety import (
@@ -11,6 +13,7 @@ from dex_llm.executor.safety import (
     PreSubmitValidator,
     RateLimitBudgeter,
     build_deterministic_cloid,
+    extract_role_from_cloid,
 )
 from dex_llm.models import (
     LiveOrderState,
@@ -122,6 +125,10 @@ def test_build_deterministic_cloid_is_revisioned() -> None:
     assert first != revised
     assert first.startswith("0x")
     assert len(first) == 34
+    assert extract_role_from_cloid(first) == OrderRole.ENTRY
+    assert extract_role_from_cloid(
+        build_deterministic_cloid("strategy", "BTC", frame_ts, OrderRole.TAKE_PROFIT_1, 1)
+    ) == OrderRole.TAKE_PROFIT_1
 
 
 def test_nonce_manager_seeds_and_increments(tmp_path: Path) -> None:
@@ -287,6 +294,61 @@ def test_exchange_executor_reconciles_modify_and_cancel_place() -> None:
     assert len(exchange.ordered) == 1
 
 
+def test_exchange_executor_keeps_unchanged_orders() -> None:
+    exchange = FakeExchange()
+    validator = PreSubmitValidator(
+        {"BTC": AssetMetadata(symbol="BTC", asset_index=0, size_decimals=3, max_leverage=20.0)}
+    )
+    executor = HyperliquidExchangeExecutor(
+        base_url="https://api.hyperliquid.xyz",
+        signer_private_key="0x59c6995e998f97a5a0044966f094538b2924c92f6e7e0c0c7f3d4e3cbb0dbe4a",
+        signer_agent_address="0x0000000000000000000000000000000000000000",
+        trading_user_address="0x1111111111111111111111111111111111111111",
+        validator=validator,
+        nonce_manager=NonceManager("0xsigner", now_ms=lambda: 1_000),
+        exchange_client=exchange,
+    )
+    desired = DesiredOrder(
+        symbol="BTC",
+        side=TradeSide.LONG,
+        price=70010.0,
+        size=0.1,
+        role=OrderRole.ENTRY,
+        reduce_only=False,
+        order_type={"limit": {"tif": "Gtc"}},
+        cloid="0x11111111111111111111111111111111",
+    )
+    current = LiveOrderState(
+        coin="BTC",
+        side="B",
+        limit_price=70010.0,
+        size=0.1,
+        reduce_only=False,
+        is_trigger=False,
+        order_type="limit",
+        oid=1,
+        cloid="0x11111111111111111111111111111111",
+        status=OrderState.OPEN,
+        role=OrderRole.ENTRY,
+    )
+
+    receipts = executor.reconcile_orders(
+        symbol="BTC",
+        desired_orders=[desired],
+        current_orders=[current],
+        current_position_size=0.0,
+        best_bid=70000.0,
+        best_ask=70010.0,
+        oracle_price=70005.0,
+    )
+
+    assert len(receipts) == 1
+    assert receipts[0].decision == ReconciliationDecision.KEEP
+    assert not exchange.modified
+    assert not exchange.canceled
+    assert not exchange.ordered
+
+
 def test_exchange_executor_schedule_dead_man_switch_is_flat_only() -> None:
     exchange = FakeExchange()
     validator = PreSubmitValidator(
@@ -315,6 +377,43 @@ def test_exchange_executor_schedule_dead_man_switch_is_flat_only() -> None:
 
     assert exchange.schedule_cancel_calls[0] is not None
     assert exchange.schedule_cancel_calls[1] is None
+
+
+def test_build_executor_uses_requested_symbol() -> None:
+    class DummyGateway:
+        def __init__(self) -> None:
+            self.symbols: list[str] = []
+
+        def fetch_asset_meta(self, symbol: str) -> AssetMetadata:
+            self.symbols.append(symbol)
+            return AssetMetadata(symbol=symbol, asset_index=0, size_decimals=3)
+
+        def user_rate_limit(self, user: str) -> dict[str, int]:
+            return {"nRequestsUsed": 0, "nRequestsCap": 100}
+
+        def query_order_by_cloid(self, user: str, cloid: str) -> dict[str, object]:
+            return {}
+
+        def open_orders(self, user: str) -> list[dict[str, object]]:
+            return []
+
+        def historical_orders(self, user: str) -> list[dict[str, object]]:
+            return []
+
+    settings = AppSettings(
+        signer_private_key="0x59c6995e998f97a5a0044966f094538b2924c92f6e7e0c0c7f3d4e3cbb0dbe4a",
+        signer_agent_address="0x0000000000000000000000000000000000000000",
+    )
+    gateway = DummyGateway()
+
+    _build_executor(
+        settings,
+        symbol="ETH",
+        rest_gateway=gateway,
+        user_address="0x1111111111111111111111111111111111111111",
+    )
+
+    assert gateway.symbols == ["ETH"]
 
 
 def test_leverage_preflight_rejects_insufficient_isolated_margin() -> None:

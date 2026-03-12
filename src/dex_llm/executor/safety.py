@@ -60,8 +60,29 @@ def build_deterministic_cloid(
     role: OrderRole,
     revision: int,
 ) -> str:
+    role_prefix = {
+        OrderRole.ENTRY: "11",
+        OrderRole.TAKE_PROFIT_1: "21",
+        OrderRole.TAKE_PROFIT_2: "22",
+        OrderRole.STOP_LOSS: "31",
+        OrderRole.UNKNOWN: "ff",
+    }[role]
+    revision_prefix = f"{max(0, min(revision, 255)):02x}"
     payload = f"{strategy_id}:{symbol}:{frame_ts.isoformat()}:{role.value}:{revision}"
-    return "0x" + hashlib.blake2b(payload.encode("utf-8"), digest_size=16).hexdigest()
+    digest = hashlib.blake2b(payload.encode("utf-8"), digest_size=14).hexdigest()
+    return f"0x{role_prefix}{revision_prefix}{digest}"
+
+
+def extract_role_from_cloid(cloid: str | None) -> OrderRole:
+    if not cloid or not cloid.startswith("0x") or len(cloid) < 6:
+        return OrderRole.UNKNOWN
+    prefix = cloid[2:4].lower()
+    return {
+        "11": OrderRole.ENTRY,
+        "21": OrderRole.TAKE_PROFIT_1,
+        "22": OrderRole.TAKE_PROFIT_2,
+        "31": OrderRole.STOP_LOSS,
+    }.get(prefix, OrderRole.UNKNOWN)
 
 
 def canonical_fill_key(fill: Mapping[str, object]) -> str:

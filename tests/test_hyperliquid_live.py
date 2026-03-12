@@ -95,6 +95,7 @@ def test_parse_helpers_cover_bbo_asset_ctx_and_user_event() -> None:
 
 
 def test_parse_live_order_maps_role_and_status() -> None:
+    cloid = "0x2101abcdefabcdefabcdefabcdefabcd"
     order = parse_live_order(
         {
             "coin": "BTC",
@@ -105,7 +106,7 @@ def test_parse_live_order_maps_role_and_status() -> None:
             "isTrigger": False,
             "orderType": "limit",
             "oid": 5,
-            "cloid": "tp1",
+            "cloid": cloid,
             "status": "filled",
             "timestamp": 1_773_276_479_505,
         }
@@ -187,8 +188,7 @@ def test_ws_state_client_ingests_messages_and_dedupes_fills() -> None:
             "channel": "bbo",
             "data": {
                 "coin": "BTC",
-                "bid": {"px": "70000"},
-                "ask": {"px": "70010"},
+                "bbo": [{"px": "70000"}, {"px": "70010"}],
                 "time": 1_773_276_479_505,
             },
         }
@@ -231,7 +231,7 @@ def test_ws_state_client_ingests_messages_and_dedupes_fills() -> None:
     )
     client.ingest_message(
         {
-            "channel": "user",
+            "channel": "userEvents",
             "data": {"type": "liquidation", "coin": "BTC", "time": 1_773_276_479_505},
         }
     )

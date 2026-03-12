@@ -206,6 +206,7 @@ def _build_ws_frame(
 def _build_executor(
     settings: AppSettings,
     *,
+    symbol: str,
     rest_gateway: HyperliquidRestGateway,
     user_address: str,
 ) -> HyperliquidExchangeExecutor:
@@ -214,9 +215,9 @@ def _build_executor(
             "DEX_LLM_SIGNER_PRIVATE_KEY and "
             "DEX_LLM_SIGNER_AGENT_ADDRESS are required for live execution"
         )
-    asset_meta = rest_gateway.fetch_asset_meta(settings.symbol)
+    asset_meta = rest_gateway.fetch_asset_meta(symbol)
     validator = PreSubmitValidator(
-        {settings.symbol: asset_meta},
+        {symbol: asset_meta},
         max_price_deviation_bps=settings.max_price_deviation_bps,
     )
     budgeter = RateLimitBudgeter()
@@ -545,7 +546,12 @@ def execute_live(
         timeout_s=settings.request_timeout_s,
     )
     try:
-        executor = _build_executor(settings, rest_gateway=rest_gateway, user_address=resolved_user)
+        executor = _build_executor(
+            settings,
+            symbol=symbol,
+            rest_gateway=rest_gateway,
+            user_address=resolved_user,
+        )
         executor.verify_signer()
         leverage_preflight = executor.apply_leverage_preflight(
             symbol=symbol,

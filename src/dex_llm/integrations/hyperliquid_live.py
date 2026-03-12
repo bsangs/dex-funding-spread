@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from hyperliquid.info import Info
 from hyperliquid.utils.types import Cloid
 
-from dex_llm.executor.safety import AssetMetadata
+from dex_llm.executor.safety import AssetMetadata, extract_role_from_cloid
 from dex_llm.integrations.hyperliquid import HyperliquidInfoClient
 from dex_llm.models import (
     BboSnapshot,
@@ -293,13 +293,13 @@ class HyperliquidWsStateClient:
                     data,
                     fallback_symbol=self._symbol or "",
                 )
-            elif channel == "webData2":
+            elif channel in {"webData2", "webData3"}:
                 self._apply_web_data2(data)
             elif channel == "orderUpdates":
                 self._apply_order_updates(data)
             elif channel == "userFills":
                 self._apply_user_fills(data)
-            elif channel == "user":
+            elif channel in {"user", "userEvents"}:
                 self._apply_user_events(data)
             self._channel_timestamps[channel] = datetime.now(tz=UTC)
             self._channel_snapshot_flags[channel] = is_snapshot
@@ -380,8 +380,12 @@ class HyperliquidWsStateClient:
 def parse_bbo_message(payload: object, *, fallback_symbol: str) -> BboSnapshot:
     if not isinstance(payload, dict):
         raise ValueError("Unexpected bbo payload")
-    bid = payload.get("bid") or payload.get("bidPx") or payload.get("b")
-    ask = payload.get("ask") or payload.get("askPx") or payload.get("a")
+    bbo = payload.get("bbo")
+    if isinstance(bbo, list) and len(bbo) >= 2:
+        bid, ask = bbo[0], bbo[1]
+    else:
+        bid = payload.get("bid") or payload.get("bidPx") or payload.get("b")
+        ask = payload.get("ask") or payload.get("askPx") or payload.get("a")
     bid_px = _extract_price(bid)
     ask_px = _extract_price(ask)
     timestamp = _extract_datetime(payload.get("time")) or datetime.now(tz=UTC)
@@ -416,6 +420,7 @@ def parse_live_order(payload: Mapping[str, object]) -> LiveOrderState:
     side = str(payload.get("side", ""))
     status_raw = str(payload.get("status", "open"))
     cloid = _coerce_optional_str(payload.get("cloid") or payload.get("clientOrderId"))
+    role_hint = str(payload.get("role") or payload.get("clientTag") or cloid or "unknown")
     return LiveOrderState(
         coin=str(payload.get("coin", "")),
         side=side,
@@ -427,9 +432,7 @@ def parse_live_order(payload: Mapping[str, object]) -> LiveOrderState:
         oid=int(payload.get("oid", 0)),
         cloid=cloid,
         status=_parse_order_state(status_raw),
-        role=_parse_order_role(
-            str(payload.get("role") or payload.get("clientTag") or cloid or "unknown")
-        ),
+        role=_parse_order_role(role_hint),
         timestamp=_extract_datetime(payload.get("timestamp")),
         trigger_price=_coerce_float(payload.get("triggerPx")),
     )
@@ -493,6 +496,9 @@ def _parse_order_state(status: str) -> OrderState:
 
 def _parse_order_role(value: str) -> OrderRole:
     lowered = value.lower()
+    role_from_cloid = extract_role_from_cloid(value)
+    if role_from_cloid != OrderRole.UNKNOWN:
+        return role_from_cloid
     if lowered in {OrderRole.ENTRY.value, "entry"}:
         return OrderRole.ENTRY
     if lowered in {OrderRole.TAKE_PROFIT_1.value, "take_profit_1"}:
