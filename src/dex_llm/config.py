@@ -9,7 +9,7 @@ from dex_llm.models import ExecutionMode, MarginMode
 
 class AppSettings(BaseSettings):
     dex_name: str = "hyperliquid"
-    symbol: str = "BTC"
+    symbol: str = "ETH"
     heatmap_source: str = "external"
     llm_provider: str = "openai"
     llm_model: str = "gpt-5.4"

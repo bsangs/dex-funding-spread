@@ -22,6 +22,7 @@ def test_risk_policy_sizes_allowed_trade() -> None:
 
     assert assessment.allowed is True
     assert assessment.recommended_quantity > 0
+    assert "risk checks passed" in assessment.reason
 
 
 def test_risk_policy_blocks_after_two_losses() -> None:

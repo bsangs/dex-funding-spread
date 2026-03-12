@@ -27,6 +27,7 @@ from dex_llm.models import (
     PendingActionState,
     PositionState,
     ReconciliationDecision,
+    RestingOrderPlan,
     TradePlan,
     TradeSide,
 )
@@ -59,6 +60,8 @@ class HyperliquidExchangeExecutor:
         vault_address: str | None = None,
         exchange_client: Exchange | None = None,
         ambiguous_resolver: AmbiguousStateResolver | None = None,
+        keep_price_tolerance_bps: float = 2.0,
+        keep_size_tolerance_fraction: float = 0.001,
     ) -> None:
         self.wallet = Account.from_key(signer_private_key)
         self.signer_agent_address = signer_agent_address.lower()
@@ -73,6 +76,8 @@ class HyperliquidExchangeExecutor:
             vault_address=vault_address,
         )
         self.ambiguous_resolver = ambiguous_resolver
+        self.keep_price_tolerance_bps = keep_price_tolerance_bps
+        self.keep_size_tolerance_fraction = keep_size_tolerance_fraction
 
     def verify_signer(self) -> None:
         derived = self.wallet.address.lower()
@@ -137,6 +142,15 @@ class HyperliquidExchangeExecutor:
         revision: int,
         strategy_id: str = "dex-llm",
     ) -> list[DesiredOrder]:
+        if plan.resting_orders:
+            return self.build_orders_from_resting_orders(
+                symbol=symbol,
+                resting_orders=plan.resting_orders,
+                quantity=quantity,
+                frame_timestamp=frame_timestamp,
+                revision=revision,
+                strategy_id=strategy_id,
+            )
         if plan.side not in {TradeSide.LONG, TradeSide.SHORT}:
             return []
         entry_price = sum(plan.entry_band) / 2
@@ -221,6 +235,105 @@ class HyperliquidExchangeExecutor:
             ),
         ]
 
+    def build_orders_from_resting_orders(
+        self,
+        *,
+        symbol: str,
+        resting_orders: list[RestingOrderPlan],
+        quantity: float,
+        frame_timestamp: datetime,
+        revision: int,
+        strategy_id: str = "dex-llm",
+        entry_only: bool = True,
+        side_filter: TradeSide | None = None,
+    ) -> list[DesiredOrder]:
+        desired_orders: list[DesiredOrder] = []
+        for resting_order in resting_orders:
+            if side_filter is not None and resting_order.side != side_filter:
+                continue
+            if entry_only:
+                desired_orders.append(
+                    DesiredOrder(
+                        symbol=symbol,
+                        side=resting_order.side,
+                        price=sum(resting_order.entry_band) / 2,
+                        size=quantity,
+                        role=OrderRole.ENTRY,
+                        reduce_only=False,
+                        order_type={"limit": {"tif": "Gtc"}},
+                        cloid=build_deterministic_cloid(
+                            strategy_id,
+                            symbol,
+                            frame_timestamp,
+                            OrderRole.ENTRY,
+                            revision if resting_order.side == TradeSide.LONG else revision + 1,
+                        ),
+                        expires_after=None,
+                    )
+                )
+                continue
+
+            exit_side = TradeSide.SHORT if resting_order.side == TradeSide.LONG else TradeSide.LONG
+            desired_orders.extend(
+                [
+                    DesiredOrder(
+                        symbol=symbol,
+                        side=exit_side,
+                        price=resting_order.invalid_if,
+                        size=quantity,
+                        role=OrderRole.STOP_LOSS,
+                        reduce_only=True,
+                        order_type={
+                            "trigger": {
+                                "triggerPx": resting_order.invalid_if,
+                                "isMarket": True,
+                                "tpsl": "sl",
+                            }
+                        },
+                        cloid=build_deterministic_cloid(
+                            strategy_id,
+                            symbol,
+                            frame_timestamp,
+                            OrderRole.STOP_LOSS,
+                            revision,
+                        ),
+                    ),
+                    DesiredOrder(
+                        symbol=symbol,
+                        side=exit_side,
+                        price=resting_order.tp1,
+                        size=quantity / 2,
+                        role=OrderRole.TAKE_PROFIT_1,
+                        reduce_only=True,
+                        order_type={"limit": {"tif": "Gtc"}},
+                        cloid=build_deterministic_cloid(
+                            strategy_id,
+                            symbol,
+                            frame_timestamp,
+                            OrderRole.TAKE_PROFIT_1,
+                            revision,
+                        ),
+                    ),
+                    DesiredOrder(
+                        symbol=symbol,
+                        side=exit_side,
+                        price=resting_order.tp2,
+                        size=quantity / 2,
+                        role=OrderRole.TAKE_PROFIT_2,
+                        reduce_only=True,
+                        order_type={"limit": {"tif": "Gtc"}},
+                        cloid=build_deterministic_cloid(
+                            strategy_id,
+                            symbol,
+                            frame_timestamp,
+                            OrderRole.TAKE_PROFIT_2,
+                            revision,
+                        ),
+                    ),
+                ]
+            )
+        return desired_orders
+
     def execute_plan(
         self,
         *,
@@ -255,12 +368,27 @@ class HyperliquidExchangeExecutor:
             frame_timestamp=frame_timestamp,
             revision=revision,
         )
-        if position.side == TradeSide.FLAT:
+        if plan.resting_orders:
+            if position.side == TradeSide.FLAT:
+                desired_orders = [
+                    order for order in desired_orders if order.role == OrderRole.ENTRY
+                ]
+            else:
+                desired_orders = self.build_orders_from_resting_orders(
+                    symbol=symbol,
+                    resting_orders=plan.resting_orders,
+                    quantity=position.quantity or quantity,
+                    frame_timestamp=frame_timestamp,
+                    revision=revision,
+                    entry_only=False,
+                    side_filter=position.side,
+                )
+        elif position.side == TradeSide.FLAT:
             desired_orders = [order for order in desired_orders if order.role == OrderRole.ENTRY]
         else:
             desired_orders = [order for order in desired_orders if order.role != OrderRole.ENTRY]
 
-        return self.reconcile_orders(
+        receipts = self.reconcile_orders(
             symbol=symbol,
             desired_orders=desired_orders,
             current_orders=position.active_orders,
@@ -269,6 +397,21 @@ class HyperliquidExchangeExecutor:
             best_ask=best_ask,
             oracle_price=oracle_price,
         )
+        if position.side == TradeSide.FLAT:
+            exit_receipts = self._sync_protection_after_fill(
+                symbol=symbol,
+                plan=plan,
+                quantity=quantity,
+                frame_timestamp=frame_timestamp,
+                revision=revision,
+                receipts=receipts,
+                current_orders=position.active_orders,
+                best_bid=best_bid,
+                best_ask=best_ask,
+                oracle_price=oracle_price,
+            )
+            receipts.extend(exit_receipts)
+        return receipts
 
     def reconcile_orders(
         self,
@@ -281,11 +424,15 @@ class HyperliquidExchangeExecutor:
         best_ask: float,
         oracle_price: float | None,
     ) -> list[ExecutionReceipt]:
-        current_by_role = {order.role: order for order in current_orders if order.coin == symbol}
+        current_by_key = {
+            self._order_key(order.role, self._trade_side_from_order(order)): order
+            for order in current_orders
+            if order.coin == symbol
+        }
         receipts: list[ExecutionReceipt] = []
 
         for desired in desired_orders:
-            current = current_by_role.get(desired.role)
+            current = current_by_key.get(self._order_key(desired.role, desired.side))
             if current is None:
                 receipts.append(
                     self.place_order(
@@ -333,9 +480,10 @@ class HyperliquidExchangeExecutor:
                 )
             )
 
-        desired_roles = {order.role for order in desired_orders}
+        desired_keys = {self._order_key(order.role, order.side) for order in desired_orders}
         for current in current_orders:
-            if current.coin != symbol or current.role in desired_roles:
+            current_key = self._order_key(current.role, self._trade_side_from_order(current))
+            if current.coin != symbol or current_key in desired_keys:
                 continue
             receipts.append(self.cancel_order(symbol, current))
 
@@ -533,15 +681,102 @@ class HyperliquidExchangeExecutor:
             and current_trigger == desired_trigger
         )
 
-    @staticmethod
-    def _can_keep(current: LiveOrderState, desired: DesiredOrder) -> bool:
-        if not HyperliquidExchangeExecutor._can_modify(current, desired):
+    def _can_keep(self, current: LiveOrderState, desired: DesiredOrder) -> bool:
+        if not self._can_modify(current, desired):
             return False
-        if abs(current.limit_price - desired.price) > 1e-9:
+        if desired.price <= 0:
             return False
-        if abs(current.size - desired.size) > 1e-9:
+        price_delta_bps = abs(current.limit_price - desired.price) / desired.price * 10_000
+        if price_delta_bps > self.keep_price_tolerance_bps:
+            return False
+        if desired.size <= 0:
+            return False
+        size_delta_fraction = abs(current.size - desired.size) / desired.size
+        if size_delta_fraction > self.keep_size_tolerance_fraction:
             return False
         return True
+
+    @staticmethod
+    def _order_key(role: OrderRole, side: TradeSide) -> tuple[OrderRole, TradeSide]:
+        return role, side
+
+    @staticmethod
+    def _trade_side_from_order(order: LiveOrderState) -> TradeSide:
+        return TradeSide.LONG if order.side.upper() in {"B", "BUY"} else TradeSide.SHORT
+
+    def _sync_protection_after_fill(
+        self,
+        *,
+        symbol: str,
+        plan: TradePlan,
+        quantity: float,
+        frame_timestamp: datetime,
+        revision: int,
+        receipts: list[ExecutionReceipt],
+        current_orders: Iterable[LiveOrderState],
+        best_bid: float,
+        best_ask: float,
+        oracle_price: float | None,
+    ) -> list[ExecutionReceipt]:
+        filled_entries = [
+            receipt
+            for receipt in receipts
+            if receipt.action in {"place", "modify"}
+            and receipt.status == OrderState.FILLED
+            and receipt.decision in {ReconciliationDecision.PLACE, ReconciliationDecision.MODIFY}
+        ]
+        if not filled_entries:
+            return []
+
+        side_filter = None
+        if plan.resting_orders:
+            desired_map = {
+                order.cloid: order
+                for order in self.build_orders_from_resting_orders(
+                    symbol=symbol,
+                    resting_orders=plan.resting_orders,
+                    quantity=quantity,
+                    frame_timestamp=frame_timestamp,
+                    revision=revision,
+                )
+            }
+            for receipt in filled_entries:
+                desired = desired_map.get(receipt.cloid)
+                if desired is not None:
+                    side_filter = desired.side
+                    break
+            if side_filter is None:
+                return []
+            desired_orders = self.build_orders_from_resting_orders(
+                symbol=symbol,
+                resting_orders=plan.resting_orders,
+                quantity=quantity,
+                frame_timestamp=frame_timestamp,
+                revision=revision,
+                entry_only=False,
+                side_filter=side_filter,
+            )
+        else:
+            if plan.side == TradeSide.FLAT:
+                return []
+            full_orders = self.build_orders_from_plan(
+                symbol=symbol,
+                plan=plan,
+                quantity=quantity,
+                frame_timestamp=frame_timestamp,
+                revision=revision,
+            )
+            desired_orders = [order for order in full_orders if order.role != OrderRole.ENTRY]
+
+        return self.reconcile_orders(
+            symbol=symbol,
+            desired_orders=desired_orders,
+            current_orders=current_orders,
+            current_position_size=quantity,
+            best_bid=best_bid,
+            best_ask=best_ask,
+            oracle_price=oracle_price,
+        )
 
     def _set_expires_after(self, expires_after: int | None) -> None:
         self.exchange.set_expires_after(expires_after)

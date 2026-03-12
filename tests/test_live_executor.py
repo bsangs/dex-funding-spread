@@ -21,7 +21,11 @@ from dex_llm.models import (
     OrderRole,
     OrderState,
     PendingActionState,
+    Playbook,
+    PositionState,
     ReconciliationDecision,
+    RestingOrderPlan,
+    TradePlan,
     TradeSide,
 )
 
@@ -112,6 +116,37 @@ class FakeExchange:
     def cancel(self, symbol: str, oid: int) -> dict[str, object]:
         self.canceled.append((symbol, oid))
         return {"status": "ok", "response": {"status": "canceled"}}
+
+
+class FilledEntryExchange(FakeExchange):
+    def __init__(self) -> None:
+        super().__init__()
+        self.order_statuses = ["filled", "open", "open", "open"]
+
+    def order(
+        self,
+        *,
+        name: str,
+        is_buy: bool,
+        sz: float,
+        limit_px: float,
+        order_type: dict[str, object],
+        reduce_only: bool,
+        cloid: object,
+    ) -> dict[str, object]:
+        response = super().order(
+            name=name,
+            is_buy=is_buy,
+            sz=sz,
+            limit_px=limit_px,
+            order_type=order_type,
+            reduce_only=reduce_only,
+            cloid=cloid,
+        )
+        status = self.order_statuses[len(self.ordered) - 1]
+        response["response"]["status"] = status
+        response["response"]["oid"] = len(self.ordered)
+        return response
 
 
 def test_build_deterministic_cloid_is_revisioned() -> None:
@@ -251,7 +286,7 @@ def test_exchange_executor_reconciles_modify_and_cancel_place() -> None:
         LiveOrderState(
             coin="BTC",
             side="B",
-            limit_price=70000.0,
+            limit_price=69900.0,
             size=0.1,
             reduce_only=False,
             is_trigger=False,
@@ -347,6 +382,67 @@ def test_exchange_executor_keeps_unchanged_orders() -> None:
     assert not exchange.modified
     assert not exchange.canceled
     assert not exchange.ordered
+
+
+def test_execute_plan_places_protection_after_filled_cluster_fade_entry() -> None:
+    exchange = FilledEntryExchange()
+    validator = PreSubmitValidator(
+        {"BTC": AssetMetadata(symbol="BTC", asset_index=0, size_decimals=3, max_leverage=20.0)}
+    )
+    executor = HyperliquidExchangeExecutor(
+        base_url="https://api.hyperliquid.xyz",
+        signer_private_key="0x59c6995e998f97a5a0044966f094538b2924c92f6e7e0c0c7f3d4e3cbb0dbe4a",
+        signer_agent_address="0x0000000000000000000000000000000000000000",
+        trading_user_address="0x1111111111111111111111111111111111111111",
+        validator=validator,
+        nonce_manager=NonceManager("0xsigner", now_ms=lambda: 1_000),
+        exchange_client=exchange,
+    )
+    plan = TradePlan(
+        playbook=Playbook.CLUSTER_FADE,
+        side=TradeSide.FLAT,
+        entry_band=(0.0, 0.0),
+        invalid_if=0.0,
+        tp1=0.0,
+        tp2=0.0,
+        ttl_min=30,
+        reason="arm both bands",
+        resting_orders=[
+            RestingOrderPlan(
+                side=TradeSide.LONG,
+                entry_band=(69990.0, 70010.0),
+                invalid_if=69850.0,
+                tp1=70100.0,
+                tp2=70200.0,
+                ttl_min=30,
+                reason="lower long fade",
+            ),
+            RestingOrderPlan(
+                side=TradeSide.SHORT,
+                entry_band=(70590.0, 70610.0),
+                invalid_if=70750.0,
+                tp1=70450.0,
+                tp2=70350.0,
+                ttl_min=30,
+                reason="upper short fade",
+            ),
+        ],
+    )
+
+    receipts = executor.execute_plan(
+        plan=plan,
+        symbol="BTC",
+        quantity=0.1,
+        frame_timestamp=datetime(2026, 3, 13, 0, 0, tzinfo=UTC),
+        position=PositionState(),
+        best_bid=70000.0,
+        best_ask=70010.0,
+        oracle_price=70005.0,
+    )
+
+    assert len(exchange.ordered) == 5
+    assert receipts[0].status == OrderState.FILLED
+    assert sum(1 for receipt in receipts if receipt.action == "place") >= 4
 
 
 def test_exchange_executor_schedule_dead_man_switch_is_flat_only() -> None:

@@ -33,6 +33,9 @@ class RiskPolicy:
             reason = kill_switch.reasons[0] if kill_switch.reasons else "kill switch active"
             return RiskAssessment(allowed=False, reason=reason)
 
+        if plan.resting_orders:
+            return self._assess_resting_orders(plan, account, position)
+
         if (
             plan.playbook in {Playbook.NO_TRADE, Playbook.DOUBLE_SWEEP}
             or plan.side == TradeSide.FLAT
@@ -73,6 +76,52 @@ class RiskPolicy:
         return RiskAssessment(
             allowed=True,
             reason="risk checks passed",
+            recommended_quantity=quantity,
+            recommended_notional=notional,
+            risk_budget=risk_budget,
+        )
+
+    def _assess_resting_orders(
+        self,
+        plan: TradePlan,
+        account: AccountState,
+        position: PositionState,
+    ) -> RiskAssessment:
+        has_pending_entry = any(not order.reduce_only for order in position.active_orders)
+        if position.entries_blocked_reduce_only or has_pending_entry:
+            return RiskAssessment(
+                allowed=False,
+                reason="entry workflow already exists; reconcile live orders first",
+            )
+        if position.side != TradeSide.FLAT or position.quantity > 0:
+            return RiskAssessment(allowed=False, reason="averaging down is disabled")
+        if position.consecutive_losses_today >= self.max_consecutive_losses:
+            return RiskAssessment(allowed=False, reason="daily loss streak limit reached")
+
+        stop_distances = [
+            abs((sum(order.entry_band) / 2) - order.invalid_if)
+            for order in plan.resting_orders
+        ]
+        if not stop_distances or min(stop_distances) <= 0:
+            return RiskAssessment(allowed=False, reason="invalid stop distance")
+
+        worst_stop_distance = max(stop_distances)
+        max_mid_entry = max(sum(order.entry_band) / 2 for order in plan.resting_orders)
+        risk_budget = account.equity * (self.risk_per_trade_pct / 100)
+        quantity = risk_budget / worst_stop_distance
+        max_notional = (
+            account.available_margin * account.max_leverage * self.notional_buffer_fraction
+        )
+        notional = quantity * max_mid_entry
+        if notional > max_notional:
+            quantity = max_notional / max_mid_entry
+            notional = max_notional
+        if quantity <= 0:
+            return RiskAssessment(allowed=False, reason="no margin available")
+
+        return RiskAssessment(
+            allowed=True,
+            reason="risk checks passed for resting cluster fade orders",
             recommended_quantity=quantity,
             recommended_notional=notional,
             risk_budget=risk_budget,

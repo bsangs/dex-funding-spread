@@ -24,6 +24,7 @@ class MapQuality(StrEnum):
 
 
 class Playbook(StrEnum):
+    CLUSTER_FADE = "cluster_fade"
     MAGNET_FOLLOW = "magnet_follow"
     SWEEP_RECLAIM = "sweep_reclaim"
     DOUBLE_SWEEP = "double_sweep"
@@ -236,8 +237,6 @@ class HyperliquidFrontendOrder(BaseModel):
     cloid: str | None = None
     trigger_price: float | None = None
     timestamp: datetime
-    cloid: str | None = None
-    trigger_price: float | None = None
 
 
 class HyperliquidUserFill(BaseModel):
@@ -312,6 +311,25 @@ class FeatureSnapshot(BaseModel):
     notes: list[str]
 
 
+class RestingOrderPlan(BaseModel):
+    side: TradeSide
+    entry_band: tuple[float, float]
+    invalid_if: float
+    tp1: float
+    tp2: float
+    ttl_min: int
+    reason: str
+    cluster_price: float | None = None
+
+    @model_validator(mode="after")
+    def validate_band(self) -> RestingOrderPlan:
+        if self.entry_band[0] > self.entry_band[1]:
+            raise ValueError("resting order entry_band must be ascending")
+        if self.side == TradeSide.FLAT:
+            raise ValueError("resting order side must be long or short")
+        return self
+
+
 class TradePlan(BaseModel):
     playbook: Playbook
     side: TradeSide
@@ -321,6 +339,7 @@ class TradePlan(BaseModel):
     tp2: float
     ttl_min: int
     reason: str
+    resting_orders: list[RestingOrderPlan] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_band(self) -> TradePlan:

@@ -35,7 +35,7 @@ console = Console()
 DEFAULT_FRAME_ARGUMENT = typer.Argument(Path("examples/sample_frame.json"))
 DEFAULT_RECORD_PATH_OPTION = typer.Option(Path("data/raw/sample-session.jsonl"))
 DEFAULT_REPLAY_ARGUMENT = typer.Argument(Path("data/raw/sample-session.jsonl"))
-DEFAULT_SYMBOL_ARGUMENT = typer.Argument("BTC")
+DEFAULT_SYMBOL_ARGUMENT = typer.Argument("ETH")
 DEFAULT_LIVE_OUT_OPTION = typer.Option(Path("data/raw/live-session.jsonl"))
 HEATMAP_PARAM_OPTION = typer.Option(
     None,
@@ -135,6 +135,29 @@ def _numeric_metadata(frame: MarketFrame, key: str) -> float | None:
     if isinstance(value, (float, int)):
         return float(value)
     return None
+
+
+def _paper_preview(plan: object, risk: object, account: AccountState) -> object:
+    resting_orders = getattr(plan, "resting_orders", [])
+    if resting_orders:
+        return [
+            {
+                "side": order.side,
+                "entry_price": sum(order.entry_band) / 2,
+                "quantity": getattr(risk, "recommended_quantity", 0.0),
+                "invalid_if": order.invalid_if,
+                "take_profit_1": order.tp1,
+                "take_profit_2": order.tp2,
+                "ttl_min": order.ttl_min,
+                "leverage": min(
+                    account.max_leverage,
+                    getattr(risk, "recommended_notional", 0.0) / account.equity,
+                ),
+                "reason": order.reason,
+            }
+            for order in resting_orders
+        ]
+    return PaperExecutor().build_ticket(plan, risk, account).model_dump(mode="json")
 
 
 def _build_ws_frame(
@@ -283,8 +306,7 @@ def inspect(
         "risk": risk.model_dump(mode="json"),
     }
     if risk.allowed:
-        ticket = PaperExecutor().build_ticket(plan, risk, account)
-        payload["paper_ticket"] = ticket.model_dump(mode="json")
+        payload["paper_ticket"] = _paper_preview(plan, risk, account)
     console.print_json(json.dumps(payload))
 
 
@@ -530,14 +552,13 @@ def execute_live(
         "risk": risk.model_dump(mode="json"),
         "live_state": meta,
     }
-    if not risk.allowed:
+    protection_only = frame.position.side != TradeSide.FLAT and frame.position.quantity > 0
+    if not risk.allowed and not protection_only:
         console.print_json(json.dumps(payload))
         return
 
     if not live and settings.execution_mode != ExecutionMode.LIVE:
-        payload["paper_ticket"] = PaperExecutor().build_ticket(plan, risk, account).model_dump(
-            mode="json"
-        )
+        payload["paper_ticket"] = _paper_preview(plan, risk, account)
         console.print_json(json.dumps(payload))
         return
 
@@ -559,7 +580,11 @@ def execute_live(
             margin_mode=settings.margin_mode,
             current_leverage=frame.position.live_leverage,
             max_leverage=account.max_leverage,
-            recommended_notional=risk.recommended_notional,
+            recommended_notional=(
+                risk.recommended_notional
+                if risk.allowed
+                else frame.position.quantity * frame.current_price
+            ),
             available_margin=account.available_margin,
         )
         payload["leverage_preflight"] = leverage_preflight.model_dump(mode="json")
@@ -569,7 +594,7 @@ def execute_live(
         receipts = executor.execute_plan(
             plan=plan,
             symbol=symbol,
-            quantity=risk.recommended_quantity,
+            quantity=risk.recommended_quantity if risk.allowed else frame.position.quantity,
             frame_timestamp=frame.timestamp,
             position=frame.position,
             best_bid=frame.metadata.get("best_bid", frame.current_price),

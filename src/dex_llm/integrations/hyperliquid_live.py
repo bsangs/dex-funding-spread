@@ -73,8 +73,11 @@ class HyperliquidRestGateway:
                 coin=symbol,
                 mark_price=_coerce_float(ctx.get("markPx")),
                 oracle_price=_coerce_float(ctx.get("oraclePx")),
+                mid_price=_coerce_float(ctx.get("midPx")),
                 max_leverage=_coerce_float(item.get("maxLeverage")),
                 funding=_coerce_float(ctx.get("funding")),
+                open_interest=_coerce_float(ctx.get("openInterest")),
+                timestamp=_extract_datetime(ctx.get("time")),
             )
         raise ValueError(f"Missing asset context for {symbol}")
 
@@ -226,7 +229,7 @@ class HyperliquidWsStateClient:
         if self.user_address:
             subscriptions.extend(
                 [
-                    {"type": "webData2", "user": self.user_address},
+                    {"type": "webData3", "user": self.user_address},
                     {"type": "orderUpdates", "user": self.user_address},
                     {"type": "userEvents", "user": self.user_address},
                     {"type": "userFills", "user": self.user_address},
@@ -411,8 +414,11 @@ def parse_active_asset_ctx_message(
         coin=str(payload.get("coin", fallback_symbol)),
         mark_price=_coerce_float(ctx.get("markPx")),
         oracle_price=_coerce_float(ctx.get("oraclePx")),
+        mid_price=_coerce_float(ctx.get("midPx")),
         max_leverage=_coerce_float(ctx.get("maxLeverage")),
         funding=_coerce_float(ctx.get("funding")),
+        open_interest=_coerce_float(ctx.get("openInterest")),
+        timestamp=_extract_datetime(ctx.get("time")),
     )
 
 

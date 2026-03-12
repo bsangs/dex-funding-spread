@@ -8,6 +8,7 @@ from dex_llm.models import (
     MapQuality,
     MarketFrame,
     Playbook,
+    RestingOrderPlan,
     TradePlan,
     TradeSide,
 )
@@ -45,6 +46,9 @@ class HeuristicPlaybookRouter:
 
         if features.sweep_reclaim_ready and frame.sweep.touched_cluster_side is not None:
             return self._sweep_reclaim(frame)
+
+        if frame.clusters_above and frame.clusters_below:
+            return self._cluster_fade(frame)
 
         if (
             features.dominant_cluster_side is not None
@@ -148,4 +152,47 @@ class HeuristicPlaybookRouter:
             tp2=0.0,
             ttl_min=0,
             reason=reason,
+        )
+
+    def _cluster_fade(self, frame: MarketFrame) -> TradePlan:
+        upper_cluster = max(frame.clusters_above, key=lambda cluster: cluster.size)
+        lower_cluster = max(frame.clusters_below, key=lambda cluster: cluster.size)
+        band_half_width = max(frame.atr * 0.05, 1.0)
+
+        lower_long = RestingOrderPlan(
+            side=TradeSide.LONG,
+            entry_band=(
+                lower_cluster.price - band_half_width,
+                lower_cluster.price + band_half_width,
+            ),
+            invalid_if=lower_cluster.price - frame.atr * 0.25,
+            tp1=frame.current_price,
+            tp2=min(upper_cluster.price, frame.current_price + frame.atr),
+            ttl_min=30,
+            reason="rest a long fade at the lower liquidation wall",
+            cluster_price=lower_cluster.price,
+        )
+        upper_short = RestingOrderPlan(
+            side=TradeSide.SHORT,
+            entry_band=(
+                upper_cluster.price - band_half_width,
+                upper_cluster.price + band_half_width,
+            ),
+            invalid_if=upper_cluster.price + frame.atr * 0.25,
+            tp1=frame.current_price,
+            tp2=max(lower_cluster.price, frame.current_price - frame.atr),
+            ttl_min=30,
+            reason="rest a short fade at the upper liquidation wall",
+            cluster_price=upper_cluster.price,
+        )
+        return TradePlan(
+            playbook=Playbook.CLUSTER_FADE,
+            side=TradeSide.FLAT,
+            entry_band=(0.0, 0.0),
+            invalid_if=0.0,
+            tp1=0.0,
+            tp2=0.0,
+            ttl_min=30,
+            reason="arm both upper-short and lower-long fade bands around major clusters",
+            resting_orders=[lower_long, upper_short],
         )

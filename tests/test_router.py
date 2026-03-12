@@ -12,14 +12,16 @@ def load_sample_frame() -> MarketFrame:
     return MarketFrame.model_validate(json.loads(Path("examples/sample_frame.json").read_text()))
 
 
-def test_router_returns_magnet_follow_for_sample_frame() -> None:
+def test_router_returns_cluster_fade_for_sample_frame() -> None:
     frame = load_sample_frame()
     features = FeatureExtractor().extract(frame)
 
     plan = HeuristicPlaybookRouter().route(frame, features)
 
-    assert plan.playbook == Playbook.MAGNET_FOLLOW
-    assert plan.side == TradeSide.LONG
+    assert plan.playbook == Playbook.CLUSTER_FADE
+    assert plan.side == TradeSide.FLAT
+    assert len(plan.resting_orders) == 2
+    assert {order.side for order in plan.resting_orders} == {TradeSide.LONG, TradeSide.SHORT}
 
 
 def test_router_returns_sweep_reclaim_when_reclaim_is_visible() -> None:
