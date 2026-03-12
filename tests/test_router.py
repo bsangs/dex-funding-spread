@@ -26,6 +26,7 @@ def test_router_returns_sweep_reclaim_when_reclaim_is_visible() -> None:
     frame = load_sample_frame()
     frame.sweep.touched_cluster_side = ClusterSide.ABOVE
     frame.sweep.body_reclaimed = True
+    frame.sweep.cluster_price = max(cluster.price for cluster in frame.clusters_above)
     features = FeatureExtractor().extract(frame)
 
     plan = HeuristicPlaybookRouter().route(frame, features)

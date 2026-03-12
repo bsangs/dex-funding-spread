@@ -5,6 +5,8 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 
 import httpx
+from hyperliquid.info import Info
+from hyperliquid.utils.types import Cloid
 
 from dex_llm.models import (
     Candle,
@@ -30,6 +32,11 @@ class HyperliquidInfoClient:
             timeout=timeout_s,
             headers={"Content-Type": "application/json"},
             transport=transport,
+        )
+        self._sdk_info = (
+            None
+            if transport is not None
+            else Info(base_url=base_url, skip_ws=True, timeout=timeout_s)
         )
 
     def close(self) -> None:
@@ -79,15 +86,37 @@ class HyperliquidInfoClient:
         user: str,
         start_time: int,
         end_time: int | None = None,
+        aggregate_by_time: bool = False,
     ) -> list[HyperliquidUserFill]:
         payload: dict[str, object] = {
             "type": "userFillsByTime",
             "user": user,
             "startTime": start_time,
+            "aggregateByTime": aggregate_by_time,
         }
         if end_time is not None:
             payload["endTime"] = end_time
         return self.parse_user_fills(self._post_info(payload))
+
+    def fetch_historical_orders(self, user: str) -> object:
+        if self._sdk_info is None:
+            raise RuntimeError("historicalOrders requires SDK-backed HyperliquidInfoClient")
+        return self._sdk_info.historical_orders(user)
+
+    def fetch_open_orders(self, user: str, dex: str = "") -> object:
+        if self._sdk_info is None:
+            raise RuntimeError("openOrders requires SDK-backed HyperliquidInfoClient")
+        return self._sdk_info.open_orders(user, dex)
+
+    def query_order_by_cloid(self, user: str, cloid: str) -> object:
+        if self._sdk_info is None:
+            raise RuntimeError("orderStatus requires SDK-backed HyperliquidInfoClient")
+        return self._sdk_info.query_order_by_cloid(user, Cloid.from_str(cloid))
+
+    def fetch_user_rate_limit(self, user: str) -> object:
+        if self._sdk_info is None:
+            raise RuntimeError("userRateLimit requires SDK-backed HyperliquidInfoClient")
+        return self._sdk_info.user_rate_limit(user)
 
     @staticmethod
     def parse_l2_book(coin: str, payload: object) -> OrderBookSnapshot:
@@ -209,6 +238,8 @@ class HyperliquidInfoClient:
                     is_trigger=bool(item.get("isTrigger", False)),
                     order_type=str(item.get("orderType", "unknown")),
                     oid=int(item.get("oid", 0)),
+                    cloid=_optional_str(item.get("cloid") or item.get("clientOrderId")),
+                    trigger_price=_optional_float(item.get("triggerPx")),
                     timestamp=datetime.fromtimestamp(
                         _coerce_float(item["timestamp"]) / 1000,
                         tz=UTC,
@@ -233,6 +264,11 @@ class HyperliquidInfoClient:
                     direction=str(item.get("dir", "")),
                     price=_coerce_float(item.get("px", 0.0)),
                     size=_coerce_float(item.get("sz", 0.0)),
+                    oid=_optional_int(item.get("oid")),
+                    fill_hash=_optional_str(item.get("hash")),
+                    side=_optional_str(item.get("side")),
+                    crossed=bool(item.get("crossed", False)),
+                    start_position=_optional_float(item.get("startPosition")),
                     time=datetime.fromtimestamp(_coerce_float(item["time"]) / 1000, tz=UTC),
                 )
             )
@@ -257,8 +293,14 @@ class HyperliquidInfoClient:
             "15m": 900_000,
             "30m": 1_800_000,
             "1h": 3_600_000,
+            "2h": 7_200_000,
             "4h": 14_400_000,
+            "8h": 28_800_000,
+            "12h": 43_200_000,
             "1d": 86_400_000,
+            "3d": 259_200_000,
+            "1w": 604_800_000,
+            "1M": 2_592_000_000,
         }
         if interval not in mapping:
             raise ValueError(f"Unsupported interval: {interval}")
@@ -285,6 +327,22 @@ def _optional_float(value: object) -> float | None:
     if value is None:
         return None
     return _coerce_float(value)
+
+
+def _optional_str(value: object) -> str | None:
+    if value is None:
+        return None
+    return str(value)
+
+
+def _optional_int(value: object) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (float, int, str)):
+        return int(value)
+    raise ValueError(f"Cannot convert {value!r} to int")
 
 
 def _coerce_float(value: object) -> float:

@@ -13,17 +13,19 @@ This codebase is optimized for replay-first strategy work on a single DEX. The p
 
 ```text
 collector -> frame store -> replay session -> feature extractor
-          -> prompt renderer / heuristic router -> risk policy -> paper executor
+          -> prompt renderer / heuristic or OpenAI router
+          -> risk policy -> paper executor or Hyperliquid live executor
           -> analytics
 ```
 
 Live collection currently looks like this:
 
 ```text
-Hyperliquid info API -> candles + order book
-Hyperliquid private info -> account state + open orders + recent fills
+Hyperliquid websocket -> l2Book + candle + bbo + activeAssetCtx
+Hyperliquid websocket -> webData2 + orderUpdates + userEvents + userFills
+Hyperliquid REST      -> meta + userFillsByTime + orderStatus + historicalOrders + rate limits
 CoinGlass heatmap API -> liquidation clusters + optional image cache
-                    \-> LiveFrameBuilder -> MarketFrame JSONL + kill-switch state
+                     \-> LiveFrameBuilder -> MarketFrame JSONL + kill-switch state
 ```
 
 ## Boundaries
@@ -41,14 +43,15 @@ CoinGlass heatmap API -> liquidation clusters + optional image cache
   Converts raw clusters into deterministic context such as dominance ratio, directional vacuum, and reclaim readiness.
 
 - `llm/`
-  Renders the prompt contract and ships a heuristic baseline router.
+  Renders the prompt contract, ships the heuristic baseline router, and optionally calls OpenAI with structured outputs.
   The router must respect the kill-switch and keep the LLM on playbook selection only.
 
 - `risk/`
   Owns all hard guards: kill-switch evaluation, no averaging down, two-loss stop, and size capping from stop distance and leverage.
 
 - `executor/`
-  Turns approved plans into paper tickets. Live execution should be added here later without changing the playbook contract.
+  Turns approved plans into paper tickets or live Hyperliquid orders.
+  Nonce tracking, pre-submit validation, ambiguous-state resolution, and reconciliation live here.
 
 - `analytics/`
   Summarizes outcomes by playbook after replay or paper trading.
@@ -64,8 +67,9 @@ The router may only return:
 
 `double_sweep` is intentionally a watch-state output. It can return `side = flat`.
 
-## Next integration points
+## Current live path
 
-1. Add an LLM provider adapter that consumes the rendered prompt and validates JSON output.
-2. Add live DEX order placement behind the current paper execution interface.
-3. Add richer heatmap-image interpretation if the structured cluster feed is not sufficient for reclaim quality.
+1. `live-frame` builds a frame from WS caches plus CoinGlass heatmap and keeps synthetic fallback observe-only.
+2. `route-live` produces features, router output, and risk assessment from the current live frame.
+3. `sync-live` inspects account state, open orders, and rate-limit posture before any new entry is attempted.
+4. `execute-live` stays paper by default and only submits real Hyperliquid orders when `--live` is present.

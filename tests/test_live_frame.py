@@ -91,6 +91,7 @@ class FakeHyperliquidClient:
         user: str,
         start_time: int,
         end_time: int | None = None,
+        aggregate_by_time: bool = False,
     ) -> list[HyperliquidUserFill]:
         return self.fills
 
@@ -176,7 +177,7 @@ def test_live_frame_builder_can_fallback_to_synthetic_clusters() -> None:
     frame = builder.build("BTC", allow_synthetic=True)
 
     assert frame.map_quality == MapQuality.MIXED
-    assert frame.metadata["heatmap_provider"] == "synthetic-orderbook"
+    assert frame.metadata["heatmap_provider"] == "synthetic-observe-only"
     assert frame.clusters_above[0].side == ClusterSide.ABOVE
     assert frame.kill_switch.allow_new_trades is False
     assert "synthetic heatmap fallback active" in frame.kill_switch.reasons

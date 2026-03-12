@@ -52,7 +52,7 @@ class KillSwitchPolicy:
         if data_age_ms > self.max_data_age_ms:
             reasons.append(f"market frame stale ({data_age_ms:.0f} ms old)")
 
-        if heatmap_provider == "synthetic-orderbook":
+        if heatmap_provider == "synthetic-observe-only":
             reasons.append("synthetic heatmap fallback active")
 
         if heatmap_error is not None:
@@ -61,9 +61,13 @@ class KillSwitchPolicy:
         if position.consecutive_losses_today >= self.max_consecutive_losses:
             reasons.append("daily loss streak limit reached")
 
+        if position.entries_blocked_reduce_only:
+            reasons.append("ambiguous live entry state requires reduce-only mode")
+
         reduce_only = bool(reasons) and (
             position.side != TradeSide.FLAT
             or position.open_orders > 0
+            or any(order.reduce_only for order in position.active_orders)
             or (private_state_required and not private_state_loaded)
         )
 
@@ -72,6 +76,7 @@ class KillSwitchPolicy:
             reduce_only=reduce_only,
             reasons=reasons,
             observed_open_orders=position.open_orders,
+            entries_blocked_reduce_only=position.entries_blocked_reduce_only,
             data_age_ms=data_age_ms,
             info_latency_ms=info_latency_ms,
             private_state_latency_ms=private_state_latency_ms,

@@ -14,10 +14,16 @@ from dex_llm.models import (
     HeatmapSnapshot,
     HyperliquidClearinghouseState,
     HyperliquidFrontendOrder,
+    HyperliquidUserEvent,
     HyperliquidUserFill,
+    LiveOrderState,
+    LiveStateSnapshot,
     MapQuality,
+    MarginMode,
     MarketFrame,
     OrderBookSnapshot,
+    OrderRole,
+    OrderState,
     PositionState,
     PriceLevel,
     SweepObservation,
@@ -48,6 +54,7 @@ class HyperliquidClientProtocol(Protocol):
         user: str,
         start_time: int,
         end_time: int | None = None,
+        aggregate_by_time: bool = False,
     ) -> list[HyperliquidUserFill]: ...
 
 
@@ -74,13 +81,16 @@ class SyntheticHeatmapProvider:
             self._cluster_from_level(level, ClusterSide.BELOW) for level in bids[:3]
         ]
         return HeatmapSnapshot(
-            provider="synthetic-orderbook",
+            provider="synthetic-observe-only",
             symbol=symbol,
             captured_at=book_snapshot_time,
             clusters_above=clusters_above,
             clusters_below=clusters_below,
             metadata={
-                "warning": "Synthetic fallback uses order book liquidity, not liquidation data.",
+                "warning": (
+                    "Synthetic fallback is observe-only and uses order book liquidity, "
+                    "not liquidation data."
+                ),
             },
         )
 
@@ -177,11 +187,21 @@ class LiveFrameBuilder:
                     second=0,
                     microsecond=0,
                 )
-                fills = self.hyperliquid_client.fetch_user_fills_by_time(
-                    user=user_address,
-                    start_time=int(day_start.timestamp() * 1000),
-                    end_time=int(book.captured_at.timestamp() * 1000),
-                )
+                if hasattr(self.hyperliquid_client, "fetch_user_fills_window"):
+                    fills, fills_safe = self.hyperliquid_client.fetch_user_fills_window(
+                        user=user_address,
+                        start_time=int(day_start.timestamp() * 1000),
+                        end_time=int(book.captured_at.timestamp() * 1000),
+                    )
+                    if not fills_safe:
+                        private_errors.append("userFillsByTime exceeded safe backfill limit")
+                else:
+                    fills = self.hyperliquid_client.fetch_user_fills_by_time(
+                        user=user_address,
+                        start_time=int(day_start.timestamp() * 1000),
+                        end_time=int(book.captured_at.timestamp() * 1000),
+                        aggregate_by_time=True,
+                    )
             except Exception as exc:
                 private_errors.append(f"userFillsByTime failed: {exc}")
 
@@ -246,6 +266,129 @@ class LiveFrameBuilder:
             heatmap_path=heatmap_snapshot.image_path or heatmap_snapshot.image_url,
             map_quality=map_quality,
             sweep=self._infer_sweep_state(candles_5m, heatmap_snapshot),
+            position=position,
+            kill_switch=kill_switch,
+            metadata=metadata,
+        )
+
+    def build_from_snapshot(
+        self,
+        snapshot: LiveStateSnapshot,
+        *,
+        heatmap_params: Mapping[str, str] | None = None,
+        allow_synthetic: bool = False,
+        fills: list[HyperliquidUserFill] | None = None,
+    ) -> MarketFrame:
+        book = snapshot.order_book
+        heatmap_errors: list[str] = []
+        heatmap_snapshot: HeatmapSnapshot | None = None
+        if self.heatmap_client is not None:
+            try:
+                heatmap_snapshot = self.heatmap_client.fetch_heatmap(
+                    symbol=snapshot.symbol,
+                    extra_params=heatmap_params,
+                )
+            except Exception as exc:
+                heatmap_errors.append(str(exc))
+
+        if heatmap_snapshot is None:
+            if not allow_synthetic:
+                raise RuntimeError(
+                    "Heatmap provider failed and synthetic fallback is disabled: "
+                    + (heatmap_errors[0] if heatmap_errors else "no provider configured")
+                )
+            heatmap_snapshot = self.synthetic_provider.from_orderbook(
+                symbol=snapshot.symbol,
+                book_snapshot_time=book.captured_at,
+                asks=book.asks,
+                bids=book.bids,
+            )
+            map_quality = MapQuality.MIXED
+        else:
+            map_quality = MapQuality.CLEAN
+
+        position = self._build_position_state(
+            symbol=snapshot.symbol,
+            clearinghouse_state=snapshot.clearinghouse_state,
+            open_orders=[
+                HyperliquidFrontendOrder(
+                    coin=order.coin,
+                    side=order.side,
+                    limit_price=order.limit_price,
+                    size=order.size,
+                    reduce_only=order.reduce_only,
+                    is_trigger=order.is_trigger,
+                    order_type=order.order_type,
+                    oid=order.oid,
+                    cloid=order.cloid,
+                    trigger_price=order.trigger_price,
+                    timestamp=order.timestamp or book.captured_at,
+                )
+                for order in snapshot.open_orders
+            ],
+            fills=fills or snapshot.recent_fills,
+            last_user_event=(
+                snapshot.recent_user_events[-1]
+                if snapshot.recent_user_events
+                else None
+            ),
+        )
+        public_age_ms = _channel_age_ms(
+            snapshot,
+            ("l2Book", "candle", "bbo", "activeAssetCtx"),
+        )
+        private_age_ms = _channel_age_ms(
+            snapshot,
+            ("webData2", "orderUpdates", "userFills", "user"),
+        )
+
+        frame_timestamp = min(book.captured_at, heatmap_snapshot.captured_at)
+        metadata: dict[str, object] = {
+            "best_bid": book.best_bid,
+            "best_ask": book.best_ask,
+            "heatmap_provider": heatmap_snapshot.provider,
+            "component_timestamps": {
+                key: value.isoformat() for key, value in snapshot.channel_timestamps.items()
+            },
+            "channel_snapshot_flags": dict(snapshot.channel_snapshot_flags),
+        }
+        if snapshot.bbo is not None:
+            metadata["bbo_mid"] = snapshot.bbo.mid
+        if snapshot.active_asset_ctx is not None:
+            metadata["oracle_price"] = snapshot.active_asset_ctx.oracle_price
+            metadata["mark_price"] = snapshot.active_asset_ctx.mark_price
+        if heatmap_errors:
+            metadata["heatmap_error"] = heatmap_errors[0]
+        if heatmap_snapshot.raw_path is not None:
+            metadata["heatmap_raw_path"] = heatmap_snapshot.raw_path
+
+        kill_switch = self.kill_switch_policy.evaluate(
+            frame_timestamp=frame_timestamp,
+            position=position,
+            info_latency_ms=public_age_ms,
+            private_state_latency_ms=private_age_ms,
+            private_state_required=(
+                snapshot.clearinghouse_state is not None or bool(snapshot.open_orders)
+            ),
+            private_state_loaded=snapshot.clearinghouse_state is not None,
+            heatmap_provider=heatmap_snapshot.provider,
+            heatmap_error=heatmap_errors[0] if heatmap_errors else None,
+        )
+        metadata["kill_switch"] = kill_switch.model_dump(mode="json")
+
+        return MarketFrame(
+            timestamp=frame_timestamp,
+            exchange="hyperliquid",
+            symbol=snapshot.symbol,
+            current_price=book.mid_price,
+            candles_5m=snapshot.candles_5m[-30:],
+            candles_15m=snapshot.candles_15m[-30:],
+            clusters_above=heatmap_snapshot.clusters_above[:3],
+            clusters_below=heatmap_snapshot.clusters_below[:3],
+            atr=max(compute_atr(snapshot.candles_15m), 1.0),
+            heatmap_path=heatmap_snapshot.image_path or heatmap_snapshot.image_url,
+            map_quality=map_quality,
+            sweep=self._infer_sweep_state(snapshot.candles_5m, heatmap_snapshot),
             position=position,
             kill_switch=kill_switch,
             metadata=metadata,
@@ -326,10 +469,21 @@ class LiveFrameBuilder:
         clearinghouse_state: HyperliquidClearinghouseState | None,
         open_orders: list[HyperliquidFrontendOrder],
         fills: list[HyperliquidUserFill],
+        last_user_event: object | None = None,
     ) -> PositionState:
         position = PositionState(
             open_orders=sum(1 for order in open_orders if order.coin == symbol),
+            active_orders=[
+                self._to_live_order(order)
+                for order in open_orders
+                if order.coin == symbol
+            ],
             consecutive_losses_today=self._count_consecutive_losses(fills, symbol),
+            last_user_event=(
+                last_user_event
+                if isinstance(last_user_event, HyperliquidUserEvent)
+                else None
+            ),
         )
         if clearinghouse_state is None:
             return position
@@ -356,10 +510,21 @@ class LiveFrameBuilder:
             entry_price=matched_position.entry_price,
             quantity=abs(matched_position.size),
             open_orders=position.open_orders,
+            active_orders=position.active_orders,
             consecutive_losses_today=position.consecutive_losses_today,
+            fills_cursor=fills[-1].fill_hash if fills else None,
+            last_user_event=position.last_user_event,
             liquidation_price=matched_position.liquidation_price,
             unrealized_pnl=matched_position.unrealized_pnl,
             margin_used=matched_position.margin_used,
+            live_leverage=matched_position.leverage_value,
+            target_leverage=matched_position.leverage_value,
+            margin_mode=MarginMode(matched_position.leverage_type)
+            if matched_position.leverage_type in {MarginMode.CROSS.value, MarginMode.ISOLATED.value}
+            else None,
+            entries_blocked_reduce_only=any(
+                not order.reduce_only for order in position.active_orders
+            ) and side == TradeSide.FLAT,
         )
 
     def _count_consecutive_losses(
@@ -372,10 +537,57 @@ class LiveFrameBuilder:
             for fill in sorted(fills, key=lambda item: item.time, reverse=True)
             if fill.coin == symbol and abs(fill.closed_pnl) > 0
         ]
+        dedupe: set[str] = set()
         streak = 0
         for fill in closed_fills:
+            identity = fill.fill_hash or (
+                f"{fill.oid}:{int(fill.time.timestamp() * 1000)}:{fill.closed_pnl}:{fill.size}"
+            )
+            if identity in dedupe:
+                continue
+            dedupe.add(identity)
             if fill.closed_pnl < 0:
                 streak += 1
                 continue
             break
         return streak
+
+    def _to_live_order(self, order: HyperliquidFrontendOrder) -> LiveOrderState:
+        role = None
+        if order.cloid is not None:
+            lowered = order.cloid.lower()
+            if "entry" in lowered:
+                role = OrderRole.ENTRY
+            elif "take_profit_1" in lowered or "tp1" in lowered:
+                role = OrderRole.TAKE_PROFIT_1
+            elif "take_profit_2" in lowered or "tp2" in lowered:
+                role = OrderRole.TAKE_PROFIT_2
+            elif "stop_loss" in lowered or lowered.endswith("sl") or ":sl" in lowered:
+                role = OrderRole.STOP_LOSS
+        return LiveOrderState(
+            coin=order.coin,
+            side=order.side,
+            limit_price=order.limit_price,
+            size=order.size,
+            reduce_only=order.reduce_only,
+            is_trigger=order.is_trigger,
+            order_type=order.order_type,
+            oid=order.oid,
+            cloid=order.cloid,
+            status=OrderState.OPEN,
+            role=role or OrderRole.UNKNOWN,
+            timestamp=order.timestamp,
+            trigger_price=order.trigger_price,
+        )
+
+
+def _channel_age_ms(snapshot: LiveStateSnapshot, channels: tuple[str, ...]) -> float | None:
+    matched = [
+        timestamp
+        for key, timestamp in snapshot.channel_timestamps.items()
+        if any(key.startswith(channel) for channel in channels)
+    ]
+    if not matched:
+        return None
+    newest = max(matched)
+    return max(0.0, (datetime.now(tz=UTC) - newest).total_seconds() * 1000)

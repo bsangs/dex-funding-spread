@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Protocol
+
 from dex_llm.models import (
     ClusterSide,
     FeatureSnapshot,
@@ -9,6 +11,10 @@ from dex_llm.models import (
     TradePlan,
     TradeSide,
 )
+
+
+class RouterProtocol(Protocol):
+    def route(self, frame: MarketFrame, features: FeatureSnapshot) -> TradePlan: ...
 
 
 class HeuristicPlaybookRouter:
@@ -26,6 +32,13 @@ class HeuristicPlaybookRouter:
 
         if frame.position.side != TradeSide.FLAT:
             return self._flat_plan("existing position detected; no averaging down")
+
+        has_pending_entry = any(
+            order.coin == frame.symbol and not order.reduce_only
+            for order in frame.position.active_orders
+        )
+        if has_pending_entry or frame.position.entries_blocked_reduce_only:
+            return self._flat_plan("existing entry workflow detected; reconcile open orders first")
 
         if frame.map_quality == MapQuality.DIRTY:
             return self._flat_plan("map is too noisy for a high-confidence playbook")
@@ -91,7 +104,9 @@ class HeuristicPlaybookRouter:
 
     def _sweep_reclaim(self, frame: MarketFrame) -> TradePlan:
         if frame.sweep.touched_cluster_side == ClusterSide.ABOVE:
-            swept_price = max(cluster.price for cluster in frame.clusters_above)
+            if frame.sweep.cluster_price is None:
+                return self._flat_plan("sweep reclaim missing touched cluster price")
+            swept_price = frame.sweep.cluster_price
             return TradePlan(
                 playbook=Playbook.SWEEP_RECLAIM,
                 side=TradeSide.SHORT,
@@ -106,7 +121,9 @@ class HeuristicPlaybookRouter:
                 reason="price swept the upper cluster and reclaimed back inside the prior range",
             )
 
-        swept_price = min(cluster.price for cluster in frame.clusters_below)
+        if frame.sweep.cluster_price is None:
+            return self._flat_plan("sweep reclaim missing touched cluster price")
+        swept_price = frame.sweep.cluster_price
         return TradePlan(
             playbook=Playbook.SWEEP_RECLAIM,
             side=TradeSide.LONG,

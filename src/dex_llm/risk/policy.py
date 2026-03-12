@@ -39,6 +39,13 @@ class RiskPolicy:
         ):
             return RiskAssessment(allowed=False, reason="playbook is observational only")
 
+        has_pending_entry = any(not order.reduce_only for order in position.active_orders)
+        if position.entries_blocked_reduce_only or has_pending_entry:
+            return RiskAssessment(
+                allowed=False,
+                reason="entry workflow already exists; reconcile live orders first",
+            )
+
         if position.side != TradeSide.FLAT or position.quantity > 0:
             return RiskAssessment(allowed=False, reason="averaging down is disabled")
 

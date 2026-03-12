@@ -87,7 +87,7 @@ class CoinGlassHeatmapClient:
             if len(levels) >= 2 and isinstance(levels[0], list) and isinstance(levels[1], list):
                 below = [self._cluster_from_level(item, ClusterSide.BELOW) for item in levels[0]]
                 above = [self._cluster_from_level(item, ClusterSide.ABOVE) for item in levels[1]]
-                return below[:3], above[:3]
+                return self._top_three(below), self._top_three(above)
 
         longs = payload.get("longs")
         shorts = payload.get("shorts")
@@ -98,7 +98,7 @@ class CoinGlassHeatmapClient:
             above_clusters = [
                 self._cluster_from_mapping(item, ClusterSide.ABOVE) for item in shorts
             ]
-            return below_clusters[:3], above_clusters[:3]
+            return self._top_three(below_clusters), self._top_three(above_clusters)
 
         clusters = payload.get("clusters")
         if isinstance(clusters, list):
@@ -110,7 +110,7 @@ class CoinGlassHeatmapClient:
                     below_clusters.append(cluster)
                 else:
                     above_clusters.append(cluster)
-            return below_clusters[:3], above_clusters[:3]
+            return self._top_three(below_clusters), self._top_three(above_clusters)
 
         raise ValueError("Unsupported CoinGlass response schema")
 
@@ -189,6 +189,9 @@ class CoinGlassHeatmapClient:
         if orders >= 5:
             return ClusterShape.STAIRCASE
         return ClusterShape.DIFFUSE
+
+    def _top_three(self, clusters: list[Cluster]) -> list[Cluster]:
+        return sorted(clusters, key=lambda cluster: cluster.size, reverse=True)[:3]
 
     def _pick(
         self,
