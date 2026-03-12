@@ -10,4 +10,7 @@ htmlcov/
 *.egg-info/
 data/raw/*.jsonl
 data/replays/*.jsonl
-
+data/heatmaps/raw/*
+!data/heatmaps/raw/.gitkeep
+data/heatmaps/images/*
+!data/heatmaps/images/.gitkeep

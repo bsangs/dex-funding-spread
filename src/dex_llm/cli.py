@@ -10,6 +10,9 @@ from dex_llm.collector.storage import JsonlFrameStore
 from dex_llm.config import AppSettings
 from dex_llm.executor.paper import PaperExecutor
 from dex_llm.features.extractor import FeatureExtractor
+from dex_llm.integrations.coinglass import CoinGlassHeatmapClient
+from dex_llm.integrations.hyperliquid import HyperliquidInfoClient
+from dex_llm.live_frame import LiveFrameBuilder
 from dex_llm.llm.prompting import load_prompt_template, render_router_prompt
 from dex_llm.llm.router import HeuristicPlaybookRouter
 from dex_llm.models import AccountState, MarketFrame
@@ -21,10 +24,32 @@ console = Console()
 DEFAULT_FRAME_ARGUMENT = typer.Argument(Path("examples/sample_frame.json"))
 DEFAULT_RECORD_PATH_OPTION = typer.Option(Path("data/raw/sample-session.jsonl"))
 DEFAULT_REPLAY_ARGUMENT = typer.Argument(Path("data/raw/sample-session.jsonl"))
+DEFAULT_SYMBOL_ARGUMENT = typer.Argument("BTC")
+DEFAULT_LIVE_OUT_OPTION = typer.Option(Path("data/raw/live-session.jsonl"))
+HEATMAP_PARAM_OPTION = typer.Option(
+    None,
+    "--heatmap-param",
+    help="Extra CoinGlass query parameter in key=value format. Repeatable.",
+)
+ALLOW_SYNTHETIC_OPTION = typer.Option(
+    False,
+    help="Fallback to synthetic order-book clusters when CoinGlass is unavailable.",
+)
+NO_WRITE_OPTION = typer.Option(False, help="Print the frame without appending it to JSONL.")
 
 
 def _load_frame(path: Path) -> MarketFrame:
     return MarketFrame.model_validate_json(path.read_text(encoding="utf-8"))
+
+
+def _parse_key_value_params(values: list[str] | None) -> dict[str, str]:
+    params: dict[str, str] = {}
+    for value in values or []:
+        if "=" not in value:
+            raise typer.BadParameter(f"Expected key=value, got {value!r}")
+        key, raw = value.split("=", 1)
+        params[key] = raw
+    return params
 
 
 @app.command()
@@ -100,6 +125,97 @@ def replay(
             ]
         )
     )
+
+
+@app.command("hyperliquid-snapshot")
+def hyperliquid_snapshot(symbol: str = DEFAULT_SYMBOL_ARGUMENT) -> None:
+    settings = AppSettings()
+    client = HyperliquidInfoClient(
+        base_url=settings.hyperliquid_base_url,
+        timeout_s=settings.request_timeout_s,
+    )
+    try:
+        book = client.fetch_l2_book(symbol)
+        candles_5m = client.fetch_candles(symbol, "5m", limit=5)
+        candles_15m = client.fetch_candles(symbol, "15m", limit=5)
+        console.print_json(
+            json.dumps(
+                {
+                    "symbol": symbol,
+                    "best_bid": book.best_bid,
+                    "best_ask": book.best_ask,
+                    "mid_price": book.mid_price,
+                    "bids": [level.model_dump(mode="json") for level in book.bids[:5]],
+                    "asks": [level.model_dump(mode="json") for level in book.asks[:5]],
+                    "candles_5m": [candle.model_dump(mode="json") for candle in candles_5m],
+                    "candles_15m": [candle.model_dump(mode="json") for candle in candles_15m],
+                }
+            )
+        )
+    finally:
+        client.close()
+
+
+@app.command("coinglass-preview")
+def coinglass_preview(
+    symbol: str = DEFAULT_SYMBOL_ARGUMENT,
+    heatmap_param: list[str] | None = HEATMAP_PARAM_OPTION,
+) -> None:
+    settings = AppSettings()
+    if not settings.coinglass_api_key:
+        raise typer.BadParameter("DEX_LLM_COINGLASS_API_KEY is required for CoinGlass preview")
+
+    client = CoinGlassHeatmapClient(
+        api_key=settings.coinglass_api_key,
+        base_url=settings.coinglass_base_url,
+        heatmap_path=settings.coinglass_heatmap_path,
+        timeout_s=settings.request_timeout_s,
+        cache_dir=settings.heatmap_cache_dir,
+    )
+    try:
+        snapshot = client.fetch_heatmap(symbol, extra_params=_parse_key_value_params(heatmap_param))
+        console.print_json(json.dumps(snapshot.model_dump(mode="json")))
+    finally:
+        client.close()
+
+
+@app.command("live-frame")
+def live_frame(
+    symbol: str = DEFAULT_SYMBOL_ARGUMENT,
+    out_path: Path = DEFAULT_LIVE_OUT_OPTION,
+    heatmap_param: list[str] | None = HEATMAP_PARAM_OPTION,
+    allow_synthetic: bool = ALLOW_SYNTHETIC_OPTION,
+    no_write: bool = NO_WRITE_OPTION,
+) -> None:
+    settings = AppSettings()
+    hyperliquid_client = HyperliquidInfoClient(
+        base_url=settings.hyperliquid_base_url,
+        timeout_s=settings.request_timeout_s,
+    )
+    coinglass_client: CoinGlassHeatmapClient | None = None
+    if settings.coinglass_api_key:
+        coinglass_client = CoinGlassHeatmapClient(
+            api_key=settings.coinglass_api_key,
+            base_url=settings.coinglass_base_url,
+            heatmap_path=settings.coinglass_heatmap_path,
+            timeout_s=settings.request_timeout_s,
+            cache_dir=settings.heatmap_cache_dir,
+        )
+
+    try:
+        builder = LiveFrameBuilder(hyperliquid_client, coinglass_client)
+        frame = builder.build(
+            symbol=symbol,
+            heatmap_params=_parse_key_value_params(heatmap_param),
+            allow_synthetic=allow_synthetic,
+        )
+        if not no_write:
+            JsonlFrameStore(out_path).append(frame)
+        console.print_json(json.dumps(frame.model_dump(mode="json")))
+    finally:
+        hyperliquid_client.close()
+        if coinglass_client is not None:
+            coinglass_client.close()
 
 
 if __name__ == "__main__":

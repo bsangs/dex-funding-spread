@@ -3,7 +3,10 @@ symbol = "BTC"
 heatmap_source = "external"
 llm_provider = "openai"
 llm_model = "gpt-5-mini"
+hyperliquid_base_url = "https://api.hyperliquid.xyz"
+coinglass_base_url = "https://open-api-v4.coinglass.com"
+coinglass_heatmap_path = "/api/futures/liquidation/aggregated-heatmap/model1"
+heatmap_cache_dir = "data/heatmaps"
 risk_per_trade_pct = 0.35
 base_leverage = 6.0
 max_leverage = 10.0
-

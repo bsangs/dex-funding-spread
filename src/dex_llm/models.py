@@ -66,6 +66,34 @@ class PositionState(BaseModel):
     consecutive_losses_today: int = 0
 
 
+class PriceLevel(BaseModel):
+    price: float = Field(gt=0.0)
+    size: float = Field(ge=0.0)
+    orders: int = Field(ge=0)
+
+
+class OrderBookSnapshot(BaseModel):
+    symbol: str
+    captured_at: datetime
+    best_bid: float = Field(gt=0.0)
+    best_ask: float = Field(gt=0.0)
+    mid_price: float = Field(gt=0.0)
+    bids: list[PriceLevel]
+    asks: list[PriceLevel]
+
+
+class HeatmapSnapshot(BaseModel):
+    provider: str
+    symbol: str
+    captured_at: datetime
+    clusters_above: list[Cluster]
+    clusters_below: list[Cluster]
+    image_url: str | None = None
+    image_path: str | None = None
+    raw_path: str | None = None
+    metadata: dict[str, object] = Field(default_factory=dict)
+
+
 class MarketFrame(BaseModel):
     timestamp: datetime
     exchange: str
@@ -80,6 +108,7 @@ class MarketFrame(BaseModel):
     map_quality: MapQuality = MapQuality.CLEAN
     sweep: SweepObservation = Field(default_factory=SweepObservation)
     position: PositionState = Field(default_factory=PositionState)
+    metadata: dict[str, object] = Field(default_factory=dict)
 
 
 class FeatureSnapshot(BaseModel):
