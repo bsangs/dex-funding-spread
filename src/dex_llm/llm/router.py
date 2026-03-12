@@ -16,6 +16,14 @@ class HeuristicPlaybookRouter:
         self.dominant_ratio_threshold = dominant_ratio_threshold
 
     def route(self, frame: MarketFrame, features: FeatureSnapshot) -> TradePlan:
+        if not frame.kill_switch.allow_new_trades:
+            reason = (
+                frame.kill_switch.reasons[0]
+                if frame.kill_switch.reasons
+                else "kill switch active"
+            )
+            return self._flat_plan(reason)
+
         if frame.position.side != TradeSide.FLAT:
             return self._flat_plan("existing position detected; no averaging down")
 

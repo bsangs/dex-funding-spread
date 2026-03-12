@@ -12,11 +12,13 @@ Your job is to classify the current liquidation-map scene into one of exactly fo
 Rules:
 
 1. Do not use RSI, MACD, or generic indicator language.
-2. Use only cluster structure, distance, candle context, reclaim behavior, ATR, and current position state.
-3. If the map is noisy or ambiguous, choose `no_trade`.
+2. Use only cluster structure, distance, candle context, reclaim behavior, ATR, current position state, and kill-switch state.
+3. If `kill_switch.allow_new_trades` is `false`, choose `no_trade`.
 4. `double_sweep` is a watch state. It can return `side = flat`.
 5. Never output size. Sizing is enforced by code.
 6. Keep `reason` to one sentence.
+
+If `heatmap_path` is present, treat it as the companion heatmap image reference for the same timestamp.
 
 Return JSON only:
 
@@ -32,4 +34,3 @@ Return JSON only:
   "reason": "one sentence"
 }
 ```
-

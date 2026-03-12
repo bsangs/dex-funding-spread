@@ -18,7 +18,7 @@ def test_risk_policy_sizes_allowed_trade() -> None:
     plan = HeuristicPlaybookRouter().route(frame, FeatureExtractor().extract(frame))
     account = AccountState(equity=10_000.0, available_margin=10_000.0, max_leverage=10.0)
 
-    assessment = RiskPolicy().assess(plan, account, frame.position)
+    assessment = RiskPolicy().assess(plan, account, frame.position, frame.kill_switch)
 
     assert assessment.allowed is True
     assert assessment.recommended_quantity > 0
@@ -30,8 +30,20 @@ def test_risk_policy_blocks_after_two_losses() -> None:
     plan = HeuristicPlaybookRouter().route(frame, FeatureExtractor().extract(frame))
     account = AccountState(equity=10_000.0, available_margin=10_000.0, max_leverage=10.0)
 
-    assessment = RiskPolicy().assess(plan, account, frame.position)
+    assessment = RiskPolicy().assess(plan, account, frame.position, frame.kill_switch)
 
     assert assessment.allowed is False
     assert "loss streak" in assessment.reason
 
+
+def test_risk_policy_blocks_when_kill_switch_is_active() -> None:
+    frame = load_sample_frame()
+    frame.kill_switch.allow_new_trades = False
+    frame.kill_switch.reasons = ["private account state unavailable"]
+    plan = HeuristicPlaybookRouter().route(frame, FeatureExtractor().extract(frame))
+    account = AccountState(equity=10_000.0, available_margin=10_000.0, max_leverage=10.0)
+
+    assessment = RiskPolicy().assess(plan, account, frame.position, frame.kill_switch)
+
+    assert assessment.allowed is False
+    assert "private account state unavailable" in assessment.reason

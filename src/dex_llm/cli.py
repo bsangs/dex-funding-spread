@@ -17,6 +17,7 @@ from dex_llm.llm.prompting import load_prompt_template, render_router_prompt
 from dex_llm.llm.router import HeuristicPlaybookRouter
 from dex_llm.models import AccountState, MarketFrame
 from dex_llm.replay.session import ReplaySession
+from dex_llm.risk.kill_switch import KillSwitchPolicy
 from dex_llm.risk.policy import RiskPolicy
 
 app = typer.Typer(no_args_is_help=True, add_completion=False)
@@ -36,6 +37,11 @@ ALLOW_SYNTHETIC_OPTION = typer.Option(
     help="Fallback to synthetic order-book clusters when CoinGlass is unavailable.",
 )
 NO_WRITE_OPTION = typer.Option(False, help="Print the frame without appending it to JSONL.")
+USER_ADDRESS_OPTION = typer.Option(
+    None,
+    "--user-address",
+    help="Hyperliquid account address used for private state and kill-switch checks.",
+)
 
 
 def _load_frame(path: Path) -> MarketFrame:
@@ -61,7 +67,10 @@ def inspect(
     frame = _load_frame(frame_path)
     extractor = FeatureExtractor()
     router = HeuristicPlaybookRouter()
-    risk_policy = RiskPolicy(risk_per_trade_pct=settings.risk_per_trade_pct)
+    risk_policy = RiskPolicy(
+        risk_per_trade_pct=settings.risk_per_trade_pct,
+        max_consecutive_losses=settings.kill_switch_max_consecutive_losses,
+    )
     account = AccountState(
         equity=equity,
         available_margin=equity,
@@ -69,7 +78,7 @@ def inspect(
     )
     features = extractor.extract(frame)
     plan = router.route(frame, features)
-    risk = risk_policy.assess(plan, account, frame.position)
+    risk = risk_policy.assess(plan, account, frame.position, frame.kill_switch)
     payload: dict[str, object] = {
         "features": features.model_dump(mode="json"),
         "plan": plan.model_dump(mode="json"),
@@ -186,6 +195,7 @@ def live_frame(
     heatmap_param: list[str] | None = HEATMAP_PARAM_OPTION,
     allow_synthetic: bool = ALLOW_SYNTHETIC_OPTION,
     no_write: bool = NO_WRITE_OPTION,
+    user_address: str | None = USER_ADDRESS_OPTION,
 ) -> None:
     settings = AppSettings()
     hyperliquid_client = HyperliquidInfoClient(
@@ -203,11 +213,22 @@ def live_frame(
         )
 
     try:
-        builder = LiveFrameBuilder(hyperliquid_client, coinglass_client)
+        builder = LiveFrameBuilder(
+            hyperliquid_client,
+            coinglass_client,
+            kill_switch_policy=KillSwitchPolicy(
+                max_info_latency_ms=settings.kill_switch_max_info_latency_ms,
+                max_private_latency_ms=settings.kill_switch_max_private_latency_ms,
+                max_data_age_ms=settings.kill_switch_max_data_age_ms,
+                max_consecutive_losses=settings.kill_switch_max_consecutive_losses,
+            ),
+        )
         frame = builder.build(
             symbol=symbol,
             heatmap_params=_parse_key_value_params(heatmap_param),
             allow_synthetic=allow_synthetic,
+            user_address=user_address or settings.hyperliquid_user_address,
+            dex=settings.hyperliquid_dex,
         )
         if not no_write:
             JsonlFrameStore(out_path).append(frame)

@@ -56,6 +56,8 @@ class SweepObservation(BaseModel):
     touched_cluster_side: ClusterSide | None = None
     wick_only: bool = False
     body_reclaimed: bool = False
+    cluster_price: float | None = None
+    trigger_candle_ts: datetime | None = None
 
 
 class PositionState(BaseModel):
@@ -64,6 +66,9 @@ class PositionState(BaseModel):
     quantity: float = 0.0
     open_orders: int = 0
     consecutive_losses_today: int = 0
+    liquidation_price: float | None = None
+    unrealized_pnl: float | None = None
+    margin_used: float | None = None
 
 
 class PriceLevel(BaseModel):
@@ -94,6 +99,67 @@ class HeatmapSnapshot(BaseModel):
     metadata: dict[str, object] = Field(default_factory=dict)
 
 
+class KillSwitchStatus(BaseModel):
+    allow_new_trades: bool = True
+    reduce_only: bool = False
+    reasons: list[str] = Field(default_factory=list)
+    observed_open_orders: int = 0
+    data_age_ms: float | None = None
+    info_latency_ms: float | None = None
+    private_state_latency_ms: float | None = None
+
+
+class HyperliquidMarginSummary(BaseModel):
+    account_value: float = 0.0
+    total_margin_used: float = 0.0
+    total_ntl_pos: float = 0.0
+    total_raw_usd: float = 0.0
+
+
+class HyperliquidPerpPosition(BaseModel):
+    coin: str
+    entry_price: float | None = None
+    liquidation_price: float | None = None
+    leverage_type: str = "cross"
+    leverage_value: float = 0.0
+    raw_usd: float | None = None
+    margin_used: float = 0.0
+    max_leverage: float = 0.0
+    position_value: float = 0.0
+    size: float = 0.0
+    unrealized_pnl: float = 0.0
+
+
+class HyperliquidClearinghouseState(BaseModel):
+    asset_positions: list[HyperliquidPerpPosition]
+    cross_maintenance_margin_used: float = 0.0
+    cross_margin_summary: HyperliquidMarginSummary
+    margin_summary: HyperliquidMarginSummary
+    withdrawable: float = 0.0
+    time: datetime
+
+
+class HyperliquidFrontendOrder(BaseModel):
+    coin: str
+    side: str
+    limit_price: float
+    size: float
+    reduce_only: bool
+    is_trigger: bool
+    order_type: str
+    oid: int
+    timestamp: datetime
+
+
+class HyperliquidUserFill(BaseModel):
+    coin: str
+    closed_pnl: float
+    direction: str
+    price: float
+    size: float
+    time: datetime
+
+
 class MarketFrame(BaseModel):
     timestamp: datetime
     exchange: str
@@ -108,6 +174,7 @@ class MarketFrame(BaseModel):
     map_quality: MapQuality = MapQuality.CLEAN
     sweep: SweepObservation = Field(default_factory=SweepObservation)
     position: PositionState = Field(default_factory=PositionState)
+    kill_switch: KillSwitchStatus = Field(default_factory=KillSwitchStatus)
     metadata: dict[str, object] = Field(default_factory=dict)
 
 

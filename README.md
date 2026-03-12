@@ -59,6 +59,13 @@ uv run dex-llm coinglass-preview BTC --heatmap-param symbol=BTC
 uv run dex-llm live-frame BTC --heatmap-param symbol=BTC --allow-synthetic
 ```
 
+If you want live frames to include private account state and kill-switch gating, also set a Hyperliquid address or pass it at the CLI:
+
+```bash
+export DEX_LLM_HYPERLIQUID_USER_ADDRESS=0x...
+uv run dex-llm live-frame BTC --user-address 0x... --heatmap-param symbol=BTC
+```
+
 ## Current defaults
 
 - Python-first implementation
@@ -67,11 +74,12 @@ uv run dex-llm live-frame BTC --heatmap-param symbol=BTC --allow-synthetic
 - heuristic baseline router included so you can compare LLM behavior against a deterministic fallback
 - risk engine blocks averaging down and stops after two consecutive losses
 - live frame builder can fall back to synthetic order-book clusters when CoinGlass is unavailable
+- live frames can include Hyperliquid private position state, open orders, recent fills, and a kill-switch snapshot
 
 ## Suggested build order
 
 1. Configure CoinGlass query params for the exact liquidation endpoint you want to use.
 2. Record JSONL sessions and cached heatmap artifacts from `dex-llm live-frame`.
-3. Compare heuristic router vs LLM router in replay runs.
-4. Add paper execution stats and private account state.
+3. Feed a Hyperliquid user address into live frames so the kill-switch can gate new trades from real account state.
+4. Compare heuristic router vs LLM router in replay runs.
 5. Only then open live order permissions.

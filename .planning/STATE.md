@@ -5,16 +5,16 @@
 See: .planning/PROJECT.md (updated 2026-03-12)
 
 **Core value:** Every trade decision must be replayable from stored market context, with the LLM limited to playbook selection and the code retaining full control of risk.
-**Current focus:** Phase 1 - Replay Foundation
+**Current focus:** Phase 2 - Live Safety Wiring
 
 ## Current Position
 
-Phase: 1 of 3 (Replay Foundation)
-Plan: 0 of 2 in current phase
+Phase: 2 of 3 (Live Safety Wiring)
+Plan: 1 of 2 in current phase
 Status: In progress
-Last activity: 2026-03-12 - Added live Hyperliquid collection, CoinGlass heatmap adapter, and synthetic fallback frame builder
+Last activity: 2026-03-12 - Added Hyperliquid private account sync, reclaim detection, prompt heatmap context, and live kill-switch gating
 
-Progress: [----------] 0%
+Progress: [######----] 60%
 
 ## Performance Metrics
 
@@ -43,14 +43,18 @@ Recent decisions affecting current work:
 - Treat the LLM as a playbook selector; keep size and loss limits in code.
 - Use Hyperliquid `info` snapshots as the default live market-data source.
 - Keep CoinGlass query params configurable at the CLI because endpoint-specific parameter names may vary.
+- Require kill-switch checks to gate routing before any new trade is considered.
+- Pull Hyperliquid private state into live frames whenever a user address is configured.
 
 ### Pending Todos
 
-None yet.
+- Add an actual LLM provider adapter behind the prompt contract.
+- Add live order placement behind the current paper execution path.
+- Replace synthetic/orderbook reclaim heuristics with production heatmap image analysis if needed.
 
 ### Blockers/Concerns
 
-Live private account state and real CoinGlass production parameters still need environment-specific wiring.
+CoinGlass production params remain environment-specific, and live execution is still paper-only.
 
 ### Quick Tasks Completed
 
@@ -60,6 +64,6 @@ Live private account state and real CoinGlass production parameters still need e
 
 ## Session Continuity
 
-Last session: 2026-03-12 00:00
-Stopped at: Live frame builder and network-backed collectors are integrated and verified
+Last session: 2026-03-12 13:30
+Stopped at: Live frame builder now enriches frames with private state, reclaim detection, and kill-switch output
 Resume file: None

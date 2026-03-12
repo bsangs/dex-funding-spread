@@ -12,6 +12,8 @@ class AppSettings(BaseSettings):
     llm_provider: str = "openai"
     llm_model: str = "gpt-5-mini"
     hyperliquid_base_url: str = "https://api.hyperliquid.xyz"
+    hyperliquid_user_address: str | None = None
+    hyperliquid_dex: str = ""
     coinglass_api_key: str | None = None
     coinglass_base_url: str = "https://open-api-v4.coinglass.com"
     coinglass_heatmap_path: str = "/api/futures/liquidation/aggregated-heatmap/model1"
@@ -20,6 +22,10 @@ class AppSettings(BaseSettings):
     replay_dir: Path = Path("data/replays")
     heatmap_cache_dir: Path = Path("data/heatmaps")
     request_timeout_s: float = 10.0
+    kill_switch_max_info_latency_ms: float = 1_500.0
+    kill_switch_max_private_latency_ms: float = 1_500.0
+    kill_switch_max_data_age_ms: float = 15_000.0
+    kill_switch_max_consecutive_losses: int = 2
     risk_per_trade_pct: float = 0.35
     base_leverage: float = 6.0
     max_leverage: float = 10.0

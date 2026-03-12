@@ -21,8 +21,9 @@ Live collection currently looks like this:
 
 ```text
 Hyperliquid info API -> candles + order book
+Hyperliquid private info -> account state + open orders + recent fills
 CoinGlass heatmap API -> liquidation clusters + optional image cache
-                    \-> LiveFrameBuilder -> MarketFrame JSONL
+                    \-> LiveFrameBuilder -> MarketFrame JSONL + kill-switch state
 ```
 
 ## Boundaries
@@ -31,7 +32,7 @@ CoinGlass heatmap API -> liquidation clusters + optional image cache
   Persists typed `MarketFrame` snapshots as JSONL.
 
 - `integrations/`
-  Fetches real snapshots from Hyperliquid and CoinGlass.
+  Fetches public and private snapshots from Hyperliquid and liquidation-map data from CoinGlass.
 
 - `replay/`
   Replays stored frames so router behavior can be compared over time.
@@ -41,10 +42,10 @@ CoinGlass heatmap API -> liquidation clusters + optional image cache
 
 - `llm/`
   Renders the prompt contract and ships a heuristic baseline router.
-  The LLM is expected to replace or sit beside the heuristic router, not the risk policy.
+  The router must respect the kill-switch and keep the LLM on playbook selection only.
 
 - `risk/`
-  Owns all hard guards: no averaging down, two-loss stop, and size capping from stop distance and leverage.
+  Owns all hard guards: kill-switch evaluation, no averaging down, two-loss stop, and size capping from stop distance and leverage.
 
 - `executor/`
   Turns approved plans into paper tickets. Live execution should be added here later without changing the playbook contract.
@@ -65,6 +66,6 @@ The router may only return:
 
 ## Next integration points
 
-1. Add private account state and open-order sync for Hyperliquid positions.
-2. Add an LLM provider adapter that consumes the rendered prompt and validates JSON output.
-3. Add live DEX order placement behind the current paper execution interface.
+1. Add an LLM provider adapter that consumes the rendered prompt and validates JSON output.
+2. Add live DEX order placement behind the current paper execution interface.
+3. Add richer heatmap-image interpretation if the structured cluster feed is not sufficient for reclaim quality.

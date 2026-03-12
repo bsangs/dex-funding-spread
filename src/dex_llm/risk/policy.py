@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dex_llm.models import (
     AccountState,
+    KillSwitchStatus,
     Playbook,
     PositionState,
     RiskAssessment,
@@ -26,7 +27,12 @@ class RiskPolicy:
         plan: TradePlan,
         account: AccountState,
         position: PositionState,
+        kill_switch: KillSwitchStatus | None = None,
     ) -> RiskAssessment:
+        if kill_switch is not None and not kill_switch.allow_new_trades:
+            reason = kill_switch.reasons[0] if kill_switch.reasons else "kill switch active"
+            return RiskAssessment(allowed=False, reason=reason)
+
         if (
             plan.playbook in {Playbook.NO_TRADE, Playbook.DOUBLE_SWEEP}
             or plan.side == TradeSide.FLAT

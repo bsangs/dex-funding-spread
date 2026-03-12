@@ -32,3 +32,15 @@ def test_router_returns_sweep_reclaim_when_reclaim_is_visible() -> None:
 
     assert plan.playbook == Playbook.SWEEP_RECLAIM
     assert plan.side == TradeSide.SHORT
+
+
+def test_router_returns_no_trade_when_kill_switch_is_active() -> None:
+    frame = load_sample_frame()
+    frame.kill_switch.allow_new_trades = False
+    frame.kill_switch.reasons = ["synthetic heatmap fallback active"]
+    features = FeatureExtractor().extract(frame)
+
+    plan = HeuristicPlaybookRouter().route(frame, features)
+
+    assert plan.playbook == Playbook.NO_TRADE
+    assert "synthetic heatmap" in plan.reason

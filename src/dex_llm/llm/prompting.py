@@ -21,8 +21,10 @@ def render_router_prompt(
         "current_price": frame.current_price,
         "atr": frame.atr,
         "map_quality": frame.map_quality.value,
+        "heatmap_path": frame.heatmap_path,
         "sweep": frame.sweep.model_dump(mode="json"),
         "position": frame.position.model_dump(mode="json"),
+        "kill_switch": frame.kill_switch.model_dump(mode="json"),
         "top_clusters_above": [
             cluster.model_dump(mode="json") for cluster in frame.clusters_above[:3]
         ],
