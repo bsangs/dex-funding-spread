@@ -28,7 +28,7 @@ Every trade decision must be replayable from stored market context, with the LLM
 
 ## Context
 
-The strategy premise comes from a conversation about treating liquidation maps as scene classification, not prediction. The preferred operating shape is `Magnet Follow + Sweep Reclaim`, with `double_sweep` and `no_trade` kept as explicit playbooks. The user requested Python-first implementation and delegated stack choices.
+The strategy premise comes from a conversation about treating liquidation maps as scene classification, not prediction. The preferred operating shape is `Magnet Follow + Sweep Reclaim`, with `double_sweep` and `no_trade` kept as explicit playbooks. The user requested Python-first implementation and delegated stack choices. The repo now includes a live Hyperliquid market-data adapter plus a CoinGlass heatmap adapter, with synthetic order-book clusters available as a plumbing fallback when CoinGlass is unavailable.
 
 ## Constraints
 
@@ -41,9 +41,10 @@ The strategy premise comes from a conversation about treating liquidation maps a
 | Decision | Rationale | Outcome |
 |----------|-----------|---------|
 | Replay-first architecture | The strategy only improves if scenes can be replayed and compared | — Pending |
-| Python-first scaffold | Fastest iteration path for a data-heavy, LLM-assisted system | — Pending |
-| Heuristic baseline router | Needed as a deterministic control against future LLM routing | — Pending |
+| Python-first scaffold | Fastest iteration path for a data-heavy, LLM-assisted system | ✓ Good |
+| Heuristic baseline router | Needed as a deterministic control against future LLM routing | ✓ Good |
+| Hyperliquid + CoinGlass integration path | Single DEX remains Hyperliquid while liquidation maps come from a dedicated provider | — Pending |
+| Synthetic heatmap fallback | Keeps collection and replay plumbing runnable even without a CoinGlass key | ⚠️ Revisit |
 
 ---
-*Last updated: 2026-03-12 after project bootstrap*
-
+*Last updated: 2026-03-12 after live integration pass*

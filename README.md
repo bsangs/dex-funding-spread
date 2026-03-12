@@ -8,6 +8,7 @@ This repo is set up for replay-first development:
 - extract deterministic features before asking an LLM anything
 - let the LLM choose a playbook, not invent position sizing
 - keep sizing, invalidation, loss limits, and kill switches in code
+- pull live market data from Hyperliquid and, when configured, liquidation-map data from CoinGlass
 
 ## Why this shape
 
@@ -45,7 +46,17 @@ tests/          scaffold verification
 uv sync --dev
 uv run dex-llm inspect examples/sample_frame.json
 uv run dex-llm prompt examples/sample_frame.json
+uv run dex-llm hyperliquid-snapshot BTC
+uv run dex-llm live-frame BTC --allow-synthetic
 uv run pytest
+```
+
+If you have a CoinGlass API key, set `DEX_LLM_COINGLASS_API_KEY` and pass any endpoint-specific query params with repeated `--heatmap-param key=value` options.
+
+```bash
+export DEX_LLM_COINGLASS_API_KEY=...
+uv run dex-llm coinglass-preview BTC --heatmap-param symbol=BTC
+uv run dex-llm live-frame BTC --heatmap-param symbol=BTC --allow-synthetic
 ```
 
 ## Current defaults
@@ -55,12 +66,12 @@ uv run pytest
 - replay-first workflow
 - heuristic baseline router included so you can compare LLM behavior against a deterministic fallback
 - risk engine blocks averaging down and stops after two consecutive losses
+- live frame builder can fall back to synthetic order-book clusters when CoinGlass is unavailable
 
 ## Suggested build order
 
-1. Replace the sample frame collector with your real DEX + heatmap provider adapter.
-2. Record JSONL sessions and heatmap image paths for replay.
+1. Configure CoinGlass query params for the exact liquidation endpoint you want to use.
+2. Record JSONL sessions and cached heatmap artifacts from `dex-llm live-frame`.
 3. Compare heuristic router vs LLM router in replay runs.
-4. Add paper execution stats.
+4. Add paper execution stats and private account state.
 5. Only then open live order permissions.
-

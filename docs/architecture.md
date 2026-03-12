@@ -17,10 +17,21 @@ collector -> frame store -> replay session -> feature extractor
           -> analytics
 ```
 
+Live collection currently looks like this:
+
+```text
+Hyperliquid info API -> candles + order book
+CoinGlass heatmap API -> liquidation clusters + optional image cache
+                    \-> LiveFrameBuilder -> MarketFrame JSONL
+```
+
 ## Boundaries
 
 - `collector/`
   Persists typed `MarketFrame` snapshots as JSONL.
+
+- `integrations/`
+  Fetches real snapshots from Hyperliquid and CoinGlass.
 
 - `replay/`
   Replays stored frames so router behavior can be compared over time.
@@ -54,6 +65,6 @@ The router may only return:
 
 ## Next integration points
 
-1. Replace `examples/sample_frame.json` with a real collector feed.
+1. Add private account state and open-order sync for Hyperliquid positions.
 2. Add an LLM provider adapter that consumes the rendered prompt and validates JSON output.
 3. Add live DEX order placement behind the current paper execution interface.

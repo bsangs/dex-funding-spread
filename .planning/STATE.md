@@ -11,8 +11,8 @@ See: .planning/PROJECT.md (updated 2026-03-12)
 
 Phase: 1 of 3 (Replay Foundation)
 Plan: 0 of 2 in current phase
-Status: Ready to plan
-Last activity: 2026-03-12 - Completed quick task 1: 지금까지 대화 기반 단일 DEX 청산맵 LLM 전략 프로젝트 초기 세팅
+Status: In progress
+Last activity: 2026-03-12 - Added live Hyperliquid collection, CoinGlass heatmap adapter, and synthetic fallback frame builder
 
 Progress: [----------] 0%
 
@@ -41,6 +41,8 @@ Recent decisions affecting current work:
 
 - Use Python-first scaffolding instead of optimizing for low-latency execution on day one.
 - Treat the LLM as a playbook selector; keep size and loss limits in code.
+- Use Hyperliquid `info` snapshots as the default live market-data source.
+- Keep CoinGlass query params configurable at the CLI because endpoint-specific parameter names may vary.
 
 ### Pending Todos
 
@@ -48,7 +50,7 @@ None yet.
 
 ### Blockers/Concerns
 
-The live build still needs a real DEX adapter and a dependable heatmap provider.
+Live private account state and real CoinGlass production parameters still need environment-specific wiring.
 
 ### Quick Tasks Completed
 
@@ -59,6 +61,5 @@ The live build still needs a real DEX adapter and a dependable heatmap provider.
 ## Session Continuity
 
 Last session: 2026-03-12 00:00
-Stopped at: Quick task 1 completed; Phase 1 scaffold is ready for the first real implementation pass
+Stopped at: Live frame builder and network-backed collectors are integrated and verified
 Resume file: None
-
