@@ -129,50 +129,12 @@ class LiveFrameBuilder:
         candles_4h = self.hyperliquid_client.fetch_candles(symbol, "4h", limit=30)
         public_latency_ms = (perf_counter() - public_started) * 1000
 
-        heatmap_errors: list[str] = []
-        heatmap_snapshot: HeatmapSnapshot | None = None
-        if self.heatmap_client is not None:
-            try:
-                heatmap_snapshot = self.heatmap_client.fetch_heatmap(
-                    symbol=symbol,
-                    extra_params=heatmap_params,
-                )
-            except Exception as exc:
-                heatmap_errors.append(str(exc))
-
-        if heatmap_snapshot is None:
-            if not allow_synthetic:
-                raise RuntimeError(
-                    "Heatmap provider failed and synthetic fallback is disabled: "
-                    + (heatmap_errors[0] if heatmap_errors else "no provider configured")
-                )
-            heatmap_snapshot = self.synthetic_provider.from_orderbook(
-                symbol=symbol,
-                book_snapshot_time=book.captured_at,
-                asks=book.asks,
-                bids=book.bids,
-            )
-            map_quality = MapQuality.MIXED
-        else:
-            map_quality = MapQuality.CLEAN
-            if not heatmap_snapshot.clusters_above and not heatmap_snapshot.clusters_below:
-                can_merge_synthetic = allow_synthetic or heatmap_snapshot.provider.startswith(
-                    "coinglass-web-scrape"
-                )
-                if not can_merge_synthetic:
-                    raise RuntimeError(
-                        "Heatmap provider returned no clusters and synthetic fallback is disabled"
-                    )
-                heatmap_snapshot = self._merge_synthetic_clusters(
-                    heatmap_snapshot=heatmap_snapshot,
-                    synthetic_snapshot=self.synthetic_provider.from_orderbook(
-                        symbol=symbol,
-                        book_snapshot_time=book.captured_at,
-                        asks=book.asks,
-                        bids=book.bids,
-                    ),
-                )
-                map_quality = MapQuality.MIXED
+        heatmap_snapshot, map_quality, heatmap_errors = self._resolve_heatmap_snapshot(
+            symbol=symbol,
+            book=book,
+            heatmap_params=heatmap_params,
+            allow_synthetic=allow_synthetic,
+        )
 
         private_errors: list[str] = []
         position = PositionState()
@@ -312,50 +274,12 @@ class LiveFrameBuilder:
         fills: list[HyperliquidUserFill] | None = None,
     ) -> MarketFrame:
         book = snapshot.order_book
-        heatmap_errors: list[str] = []
-        heatmap_snapshot: HeatmapSnapshot | None = None
-        if self.heatmap_client is not None:
-            try:
-                heatmap_snapshot = self.heatmap_client.fetch_heatmap(
-                    symbol=snapshot.symbol,
-                    extra_params=heatmap_params,
-                )
-            except Exception as exc:
-                heatmap_errors.append(str(exc))
-
-        if heatmap_snapshot is None:
-            if not allow_synthetic:
-                raise RuntimeError(
-                    "Heatmap provider failed and synthetic fallback is disabled: "
-                    + (heatmap_errors[0] if heatmap_errors else "no provider configured")
-                )
-            heatmap_snapshot = self.synthetic_provider.from_orderbook(
-                symbol=snapshot.symbol,
-                book_snapshot_time=book.captured_at,
-                asks=book.asks,
-                bids=book.bids,
-            )
-            map_quality = MapQuality.MIXED
-        else:
-            map_quality = MapQuality.CLEAN
-            if not heatmap_snapshot.clusters_above and not heatmap_snapshot.clusters_below:
-                can_merge_synthetic = allow_synthetic or heatmap_snapshot.provider.startswith(
-                    "coinglass-web-scrape"
-                )
-                if not can_merge_synthetic:
-                    raise RuntimeError(
-                        "Heatmap provider returned no clusters and synthetic fallback is disabled"
-                    )
-                heatmap_snapshot = self._merge_synthetic_clusters(
-                    heatmap_snapshot=heatmap_snapshot,
-                    synthetic_snapshot=self.synthetic_provider.from_orderbook(
-                        symbol=snapshot.symbol,
-                        book_snapshot_time=book.captured_at,
-                        asks=book.asks,
-                        bids=book.bids,
-                    ),
-                )
-                map_quality = MapQuality.MIXED
+        heatmap_snapshot, map_quality, heatmap_errors = self._resolve_heatmap_snapshot(
+            symbol=snapshot.symbol,
+            book=book,
+            heatmap_params=heatmap_params,
+            allow_synthetic=allow_synthetic,
+        )
 
         position = self._build_position_state(
             symbol=snapshot.symbol,
@@ -463,6 +387,89 @@ class LiveFrameBuilder:
             position=position,
             kill_switch=kill_switch,
             metadata=metadata,
+        )
+
+    def _resolve_heatmap_snapshot(
+        self,
+        *,
+        symbol: str,
+        book: OrderBookSnapshot,
+        heatmap_params: Mapping[str, str] | None,
+        allow_synthetic: bool,
+    ) -> tuple[HeatmapSnapshot, MapQuality, list[str]]:
+        heatmap_errors: list[str] = []
+        heatmap_snapshot: HeatmapSnapshot | None = None
+        if self.heatmap_client is not None:
+            try:
+                heatmap_snapshot = self.heatmap_client.fetch_heatmap(
+                    symbol=symbol,
+                    extra_params=heatmap_params,
+                )
+            except Exception as exc:
+                heatmap_errors.append(str(exc))
+
+        if heatmap_snapshot is None:
+            if allow_synthetic:
+                return (
+                    self.synthetic_provider.from_orderbook(
+                        symbol=symbol,
+                        book_snapshot_time=book.captured_at,
+                        asks=book.asks,
+                        bids=book.bids,
+                    ),
+                    MapQuality.MIXED,
+                    heatmap_errors,
+                )
+            if not heatmap_errors:
+                heatmap_errors.append("no heatmap provider configured")
+            return (
+                self._failed_heatmap_snapshot(
+                    symbol=symbol,
+                    captured_at=book.captured_at,
+                    error=heatmap_errors[0],
+                ),
+                MapQuality.DIRTY,
+                heatmap_errors,
+            )
+
+        if heatmap_snapshot.clusters_above or heatmap_snapshot.clusters_below:
+            return heatmap_snapshot, MapQuality.CLEAN, heatmap_errors
+
+        can_merge_synthetic = allow_synthetic or heatmap_snapshot.provider.startswith(
+            "coinglass-web-scrape"
+        )
+        if can_merge_synthetic:
+            return (
+                self._merge_synthetic_clusters(
+                    heatmap_snapshot=heatmap_snapshot,
+                    synthetic_snapshot=self.synthetic_provider.from_orderbook(
+                        symbol=symbol,
+                        book_snapshot_time=book.captured_at,
+                        asks=book.asks,
+                        bids=book.bids,
+                    ),
+                ),
+                MapQuality.MIXED,
+                heatmap_errors,
+            )
+
+        heatmap_errors.append("heatmap provider returned no clusters")
+        return heatmap_snapshot, MapQuality.DIRTY, heatmap_errors
+
+    @staticmethod
+    def _failed_heatmap_snapshot(
+        *,
+        symbol: str,
+        captured_at: datetime,
+        error: str,
+    ) -> HeatmapSnapshot:
+        return HeatmapSnapshot(
+            provider="heatmap-unavailable",
+            symbol=symbol,
+            captured_at=captured_at,
+            clusters_above=[],
+            clusters_below=[],
+            metadata={"status": "error", "error": error},
         )
 
     def _infer_sweep_state(

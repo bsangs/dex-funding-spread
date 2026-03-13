@@ -1,13 +1,21 @@
 from __future__ import annotations
 
+import io
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from rich.console import Console
+
 from dex_llm.bot import BotRuntime, StrategyState
 from dex_llm.models import (
     AccountState,
+    Candle,
     FeatureSnapshot,
+    KillSwitchStatus,
+    LiveStateSnapshot,
+    OrderBookSnapshot,
+    PriceLevel,
     HyperliquidUserFill,
     MarketFrame,
     Playbook,
@@ -420,3 +428,212 @@ def test_bot_runtime_skips_router_when_position_is_open() -> None:
 
     assert state.plan.side == TradeSide.SHORT
     assert "code-managed" in state.plan.reason
+
+
+def test_bot_runtime_emit_cycle_suppresses_idle_cycles_after_boot() -> None:
+    buffer = io.StringIO()
+    runtime = _logging_runtime(console=Console(file=buffer, force_terminal=False, width=120))
+    now = datetime.now(tz=UTC)
+    snapshot = _snapshot(now=now)
+    plan = TradePlan(
+        playbook=Playbook.NO_TRADE,
+        side=TradeSide.FLAT,
+        entry_band=(0.0, 0.0),
+        invalid_if=0.0,
+        tp1=0.0,
+        tp2=0.0,
+        ttl_min=0,
+        reason="idle",
+    )
+
+    runtime._emit_cycle(
+        cycle=1,
+        snapshot=snapshot,
+        position=PositionState(),
+        plan=plan,
+        risk=RiskAssessment(allowed=False, reason="plan requests hold/close only"),
+        kill_switch=KillSwitchStatus(),
+        receipts=[],
+        meta=_meta(),
+    )
+
+    assert "BOOT" in buffer.getvalue()
+    assert "PLAN" in buffer.getvalue()
+
+    buffer.seek(0)
+    buffer.truncate(0)
+
+    runtime._emit_cycle(
+        cycle=2,
+        snapshot=_snapshot(now=now + timedelta(minutes=1)),
+        position=PositionState(),
+        plan=plan,
+        risk=RiskAssessment(allowed=False, reason="plan requests hold/close only"),
+        kill_switch=KillSwitchStatus(),
+        receipts=[],
+        meta=_meta(),
+    )
+
+    assert buffer.getvalue() == ""
+
+
+def test_bot_runtime_emit_cycle_groups_eventful_cycle_into_review_block() -> None:
+    buffer = io.StringIO()
+    runtime = _logging_runtime(console=Console(file=buffer, force_terminal=False, width=120))
+    now = datetime.now(tz=UTC)
+    plan = TradePlan(
+        playbook=Playbook.CLUSTER_FADE,
+        side=TradeSide.LONG,
+        entry_band=(2090.0, 2092.0),
+        invalid_if=2085.0,
+        tp1=2100.0,
+        tp2=2110.0,
+        ttl_min=90,
+        reason="fade the lower wall with a single long limit order",
+    )
+
+    runtime._emit_cycle(
+        cycle=1,
+        snapshot=_snapshot(now=now),
+        position=PositionState(),
+        plan=plan,
+        risk=RiskAssessment(allowed=True, reason="side-based sizing checks passed"),
+        kill_switch=KillSwitchStatus(),
+        receipts=[
+            {
+                "action": "place",
+                "cloid": "0x1100feedfacefeedfacefeedfacefeed",
+                "oid": 12345,
+                "decision": "place",
+                "success": True,
+                "status": "open",
+                "message": "",
+            }
+        ],
+        meta=_meta(),
+    )
+
+    output = buffer.getvalue()
+    assert "REVIEW R0001" in output
+    assert "PLAN" in output
+    assert "WHY" in output
+    assert "ORDER" in output
+    assert "place entry oid=12345 status=open" in output
+
+
+def test_bot_runtime_emit_cycle_keeps_printing_errors_when_error_persists() -> None:
+    buffer = io.StringIO()
+    runtime = _logging_runtime(console=Console(file=buffer, force_terminal=False, width=120))
+    now = datetime.now(tz=UTC)
+    plan = TradePlan(
+        playbook=Playbook.NO_TRADE,
+        side=TradeSide.FLAT,
+        entry_band=(0.0, 0.0),
+        invalid_if=0.0,
+        tp1=0.0,
+        tp2=0.0,
+        ttl_min=0,
+        reason="private account state unavailable",
+    )
+    kill_switch = KillSwitchStatus(
+        allow_new_trades=False,
+        reduce_only=False,
+        reasons=["private account state unavailable"],
+    )
+
+    runtime._emit_cycle(
+        cycle=1,
+        snapshot=_snapshot(now=now),
+        position=PositionState(),
+        plan=plan,
+        risk=RiskAssessment(allowed=False, reason="private account state unavailable"),
+        kill_switch=kill_switch,
+        receipts=[],
+        meta=_meta(),
+    )
+
+    buffer.seek(0)
+    buffer.truncate(0)
+
+    runtime._emit_cycle(
+        cycle=2,
+        snapshot=_snapshot(now=now + timedelta(minutes=1)),
+        position=PositionState(),
+        plan=plan,
+        risk=RiskAssessment(allowed=False, reason="private account state unavailable"),
+        kill_switch=kill_switch,
+        receipts=[],
+        meta=_meta(),
+    )
+    second_output = buffer.getvalue()
+    assert 'ERROR    kill switch active | reason="private account state unavailable"' in second_output
+
+    buffer.seek(0)
+    buffer.truncate(0)
+
+    runtime._emit_cycle(
+        cycle=3,
+        snapshot=_snapshot(now=now + timedelta(minutes=2)),
+        position=PositionState(),
+        plan=plan,
+        risk=RiskAssessment(allowed=False, reason="private account state unavailable"),
+        kill_switch=kill_switch,
+        receipts=[],
+        meta=_meta(),
+    )
+    third_output = buffer.getvalue()
+    assert 'ERROR    kill switch active | reason="private account state unavailable"' in third_output
+
+
+def _logging_runtime(*, console: Console) -> BotRuntime:
+    runtime = object.__new__(BotRuntime)
+    runtime.symbol = "ETH"
+    runtime.user_address = "0x1234567890abcdef1234567890abcdef12345678"
+    runtime.strategy_interval_s = 300
+    runtime.sync_interval_s = 60
+    runtime.live = True
+    runtime.console = console
+    runtime._event_block_count = 0
+    runtime._boot_logged = False
+    runtime._last_plan_signature = None
+    runtime._last_position_signature = None
+    runtime._last_reduce_only_signature = None
+    runtime._last_entry_block_reason = None
+    runtime._last_active_order_signature = None
+    runtime._seen_fill_keys = set()
+    runtime._seen_user_event_keys = set()
+    return runtime
+
+
+def _snapshot(
+    *,
+    now: datetime,
+    fills: list[HyperliquidUserFill] | None = None,
+) -> LiveStateSnapshot:
+    return LiveStateSnapshot(
+        symbol="ETH",
+        order_book=OrderBookSnapshot(
+            symbol="ETH",
+            captured_at=now,
+            best_bid=2100.0,
+            best_ask=2101.0,
+            mid_price=2100.5,
+            bids=[PriceLevel(price=2100.0, size=1.0, orders=1)],
+            asks=[PriceLevel(price=2101.0, size=1.0, orders=1)],
+        ),
+        candles_5m=[
+            Candle(ts=now, open=2100.0, high=2102.0, low=2098.0, close=2101.0, volume=1.0)
+        ],
+        candles_15m=[
+            Candle(ts=now, open=2100.0, high=2103.0, low=2097.0, close=2101.0, volume=1.0)
+        ],
+        recent_fills=fills or [],
+    )
+
+
+def _meta() -> dict[str, object]:
+    return {
+        "private_state_source": "ws",
+        "private_ws_ready": True,
+        "fills_safe_complete": True,
+    }

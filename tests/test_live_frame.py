@@ -188,6 +188,30 @@ def test_live_frame_builder_can_fallback_to_synthetic_clusters() -> None:
     assert "synthetic heatmap fallback active" in frame.kill_switch.reasons
 
 
+def test_live_frame_builder_blocks_trading_when_heatmap_provider_fails() -> None:
+    class BrokenHeatmapClient:
+        def fetch_heatmap(
+            self,
+            symbol: str,
+            extra_params: Mapping[str, str] | None = None,
+        ) -> HeatmapSnapshot:
+            raise RuntimeError("liqMap upstream timeout")
+
+    client = FakeHyperliquidClient()
+    builder = LiveFrameBuilder(client, BrokenHeatmapClient())
+
+    frame = builder.build("BTC", allow_synthetic=False)
+
+    assert frame.map_quality == MapQuality.DIRTY
+    assert frame.timestamp == client.book.captured_at
+    assert frame.clusters_above == []
+    assert frame.clusters_below == []
+    assert frame.kill_switch.allow_new_trades is False
+    assert "heatmap provider error: liqMap upstream timeout" in frame.kill_switch.reasons
+    assert frame.metadata["heatmap_provider"] == "heatmap-unavailable"
+    assert frame.metadata["heatmap_error"] == "liqMap upstream timeout"
+
+
 def test_live_frame_builder_marks_upper_sweep_reclaim_from_recent_candles() -> None:
     now = datetime.now(tz=UTC)
     candles_5m = [

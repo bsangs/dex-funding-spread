@@ -1,16 +1,14 @@
 from __future__ import annotations
 
-import json
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
 
 from rich.console import Console
 
-from dex_llm.analytics.report import summarize_outcomes
 from dex_llm.executor import HyperliquidExchangeExecutor
 from dex_llm.executor.paper import PaperBroker
+from dex_llm.executor.safety import extract_role_from_cloid
 from dex_llm.features.extractor import FeatureExtractor
 from dex_llm.integrations.hyperliquid_live import HyperliquidRestGateway, HyperliquidWsStateClient
 from dex_llm.live_frame import LiveFrameBuilder, _channel_age_ms
@@ -22,14 +20,18 @@ from dex_llm.models import (
     KillSwitchStatus,
     LiveStateSnapshot,
     MarketFrame,
+    OrderRole,
     Playbook,
     PositionState,
     RestingOrderPlan,
     RiskAssessment,
     TradePlan,
     TradeSide,
+    UserEventType,
 )
 from dex_llm.risk.policy import RiskPolicy
+
+_LOG_DIVIDER = "=" * 70
 
 
 @dataclass(slots=True)
@@ -82,12 +84,21 @@ class BotRuntime:
         self.console = console or Console()
         self.paper_broker = PaperBroker(enable_stop_loss=enable_stop_loss)
         self._strategy_state: StrategyState | None = None
+        self._event_block_count = 0
+        self._boot_logged = False
+        self._last_plan_signature: tuple[object, ...] | None = None
+        self._last_position_signature: tuple[object, ...] | None = None
+        self._last_reduce_only_signature: tuple[str, ...] | None = None
+        self._last_entry_block_reason: str | None = None
+        self._last_active_order_signature: tuple[tuple[object, ...], ...] | None = None
+        self._seen_fill_keys: set[str] = set()
+        self._seen_user_event_keys: set[str] = set()
 
     def run(self, *, max_cycles: int | None = None) -> None:
         cycle = 0
-        self.ws_client.connect(self.symbol, user_address=self.user_address)
-        self.ws_client.wait_until_public_ready(timeout_s=self.rest_gateway.timeout_s)
         try:
+            self.ws_client.connect(self.symbol, user_address=self.user_address)
+            self.ws_client.wait_until_public_ready(timeout_s=self.rest_gateway.timeout_s)
             while max_cycles is None or cycle < max_cycles:
                 cycle += 1
                 cycle_started = datetime.now(tz=UTC)
@@ -96,10 +107,7 @@ class BotRuntime:
                 if not self.live:
                     pre_strategy_receipts = self._paper_mark_market(snapshot, cycle_started)
                 position = self._position_state(snapshot, fills)
-                refresh_strategy = self._should_refresh_strategy(
-                    now=cycle_started,
-                )
-                if refresh_strategy:
+                if self._should_refresh_strategy(now=cycle_started):
                     self._strategy_state = self._compute_strategy_state(snapshot, fills, position)
 
                 if self._strategy_state is None:
@@ -124,7 +132,7 @@ class BotRuntime:
                     position,
                     kill_switch,
                 )
-                receipts, leverage_preflight = self._sync_orders(
+                receipts, _ = self._sync_orders(
                     snapshot=snapshot,
                     position=position,
                     account=account,
@@ -132,23 +140,20 @@ class BotRuntime:
                     risk=risk,
                 )
                 receipts = pre_strategy_receipts + receipts
-                dms = None
                 if self.live:
-                    dms = self.executor.schedule_dead_man_switch(
+                    self.executor.schedule_dead_man_switch(
                         has_resting_entry=bool(effective_plan.resting_orders),
                         position_open=position.side != TradeSide.FLAT,
                         now=cycle_started,
                     )
                 self._emit_cycle(
                     cycle=cycle,
+                    snapshot=snapshot,
                     position=position,
-                    account=account,
                     plan=effective_plan,
                     risk=risk,
+                    kill_switch=kill_switch,
                     receipts=receipts,
-                    leverage_preflight=leverage_preflight,
-                    dms=dms,
-                    strategy_refreshed=refresh_strategy,
                     meta=meta,
                 )
                 if max_cycles is not None and cycle >= max_cycles:
@@ -159,6 +164,13 @@ class BotRuntime:
                 if sleep_for > 0:
                     self.ws_client.send_heartbeat_if_idle(idle_s=max(5.0, sleep_for / 2))
                     time.sleep(sleep_for)
+        except Exception as exc:
+            self._emit_runtime_error(
+                phase="startup" if cycle == 0 else "runtime",
+                cycle=cycle if cycle > 0 else None,
+                exc=exc,
+            )
+            raise
         finally:
             self.ws_client.close()
             self.rest_gateway.close()
@@ -586,43 +598,583 @@ class BotRuntime:
         self,
         *,
         cycle: int,
+        snapshot: LiveStateSnapshot,
         position: PositionState,
-        account: AccountState,
         plan: TradePlan,
         risk: RiskAssessment,
+        kill_switch: KillSwitchStatus,
         receipts: list[dict[str, object]],
-        leverage_preflight: dict[str, object] | None,
-        dms: Any,
-        strategy_refreshed: bool,
         meta: dict[str, object],
     ) -> None:
-        payload = {
-            "cycle": cycle,
-            "mode": "live" if self.live else "paper",
-            "strategy_refreshed": strategy_refreshed,
-            "position_side": position.side,
-            "open_orders": position.open_orders,
-            "account_equity": account.equity,
-            "available_margin": account.available_margin,
-            "plan": plan.model_dump(mode="json"),
-            "risk": risk.model_dump(mode="json"),
-            "leverage_preflight": leverage_preflight,
-            "execution_receipts": receipts,
-            "dead_man_switch": dms,
-            "live_state": {
-                "private_state_source": meta.get("private_state_source"),
-                "private_ws_ready": meta.get("private_ws_ready"),
-                "fills_safe_complete": meta.get("fills_safe_complete"),
-            },
-        }
-        if not self.live:
-            payload["paper_state"] = self.paper_broker.state_payload(
-                mark_price=self._strategy_state.frame.current_price
-                if self._strategy_state is not None
-                else 0.0
+        first_cycle = not self._boot_logged
+        lines: list[str] = []
+        has_local_order_event = False
+
+        if first_cycle:
+            lines.append(
+                self._event_line(
+                    "BOOT",
+                    (
+                        f"mode={'live' if self.live else 'paper'} "
+                        f"strategy={self.strategy_interval_s}s sync={self.sync_interval_s}s "
+                        f"user={self._short_address(self.user_address)} "
+                        f"private={meta.get('private_state_source', 'unknown')}"
+                    ),
+                )
             )
-            payload["paper_summary"] = summarize_outcomes(self.paper_broker.outcomes)
-        self.console.print_json(json.dumps(payload))
+            self._seed_seen_events(snapshot)
+
+        lines.extend(self._render_plan_events(plan=plan, first_cycle=first_cycle))
+        lines.extend(
+            self._render_reduce_only_events(
+                kill_switch=kill_switch,
+                first_cycle=first_cycle,
+            )
+        )
+        lines.extend(
+            self._render_entry_block_events(
+                plan=plan,
+                position=position,
+                risk=risk,
+                first_cycle=first_cycle,
+            )
+        )
+        lines.extend(
+            self._render_platform_error_events(
+                kill_switch=kill_switch,
+                meta=meta,
+            )
+        )
+        receipt_lines, has_local_order_event = self._render_receipt_events(
+            receipts=receipts,
+            position=position,
+        )
+        lines.extend(receipt_lines)
+        if not first_cycle:
+            lines.extend(self._render_fill_events(snapshot=snapshot))
+            lines.extend(self._render_user_events(snapshot=snapshot))
+        lines.extend(
+            self._render_external_order_events(
+                position=position,
+                first_cycle=first_cycle,
+                has_local_order_event=has_local_order_event,
+            )
+        )
+        lines.extend(
+            self._render_position_events(
+                position=position,
+                first_cycle=first_cycle,
+            )
+        )
+
+        if not lines:
+            return
+
+        self._print_event_block(
+            cycle=cycle,
+            snapshot=snapshot,
+            position=position,
+            lines=lines,
+        )
+        self._boot_logged = True
+
+    def _render_plan_events(
+        self,
+        *,
+        plan: TradePlan,
+        first_cycle: bool,
+    ) -> list[str]:
+        signature = self._plan_signature(plan)
+        should_log = first_cycle or signature != self._last_plan_signature
+        self._last_plan_signature = signature
+        if not should_log:
+            return []
+
+        summary, reason = self._describe_plan(plan)
+        return [
+            self._event_line("PLAN", summary),
+            self._event_line("WHY", reason),
+        ]
+
+    def _render_reduce_only_events(
+        self,
+        *,
+        kill_switch: KillSwitchStatus,
+        first_cycle: bool,
+    ) -> list[str]:
+        current = tuple(kill_switch.reasons) if kill_switch.reduce_only else None
+        previous = self._last_reduce_only_signature
+        self._last_reduce_only_signature = current
+        if first_cycle:
+            if current is None:
+                return []
+            return [
+                self._event_line(
+                    "BLOCK",
+                    f"reduce-only safeguards active | why=\"{kill_switch.reasons[0]}\"",
+                )
+            ]
+        if previous == current:
+            return []
+        if current is None and previous is not None:
+            return [self._event_line("RECOVERED", "reduce-only safeguards cleared")]
+        if current is None:
+            return []
+        return [
+            self._event_line(
+                "BLOCK",
+                f"reduce-only safeguards active | why=\"{kill_switch.reasons[0]}\"",
+            )
+        ]
+
+    def _render_entry_block_events(
+        self,
+        *,
+        plan: TradePlan,
+        position: PositionState,
+        risk: RiskAssessment,
+        first_cycle: bool,
+    ) -> list[str]:
+        current = None
+        if (
+            position.side == TradeSide.FLAT
+            and self._plan_is_actionable(plan)
+            and not risk.allowed
+        ):
+            current = risk.reason
+        previous = self._last_entry_block_reason
+        self._last_entry_block_reason = current
+        if first_cycle:
+            if current is None:
+                return []
+            return [self._event_line("BLOCK", f"entry blocked | why=\"{current}\"")]
+        if previous == current:
+            return []
+        if current is None and previous is not None:
+            return [self._event_line("RECOVERED", "entry gate reopened")]
+        if current is None:
+            return []
+        return [self._event_line("BLOCK", f"entry blocked | why=\"{current}\"")]
+
+    def _render_platform_error_events(
+        self,
+        *,
+        kill_switch: KillSwitchStatus,
+        meta: dict[str, object],
+    ) -> list[str]:
+        lines: list[str] = []
+        for reason in kill_switch.reasons:
+            lines.append(self._event_line("ERROR", f"kill switch active | reason=\"{reason}\""))
+        if meta.get("fills_safe_complete") is False:
+            lines.append(
+                self._event_line(
+                    "ERROR",
+                    "user fill pagination incomplete; reconciliation may miss older fills",
+                )
+            )
+        private_bootstrap_error = meta.get("private_bootstrap_error")
+        if isinstance(private_bootstrap_error, str) and private_bootstrap_error:
+            lines.append(
+                self._event_line(
+                    "ERROR",
+                    f"private bootstrap failed | reason=\"{private_bootstrap_error}\"",
+                )
+            )
+        return lines
+
+    def _render_receipt_events(
+        self,
+        *,
+        receipts: list[dict[str, object]],
+        position: PositionState,
+    ) -> tuple[list[str], bool]:
+        lines: list[str] = []
+        has_local_order_event = False
+        for receipt in receipts:
+            rendered = self._render_receipt_event(receipt=receipt, position=position)
+            if rendered is None:
+                continue
+            if rendered.startswith("ORDER"):
+                has_local_order_event = True
+            lines.append(rendered)
+        return lines, has_local_order_event
+
+    def _render_receipt_event(
+        self,
+        *,
+        receipt: dict[str, object],
+        position: PositionState,
+    ) -> str | None:
+        action = str(receipt.get("action", "unknown"))
+        if action in {"keep", "paper_keep", "paper_hold"}:
+            return None
+
+        if action in {"paper_fill_entry", "paper_tp1", "paper_tp2", "paper_stop"}:
+            label = action.replace("paper_", "").replace("_", " ")
+            return self._event_line("FILL", label)
+        if action == "paper_close":
+            message = str(receipt.get("message", "")).strip()
+            suffix = f" | why=\"{message}\"" if message else ""
+            return self._event_line("POSITION", f"paper close{suffix}")
+
+        role = self._receipt_role_label(receipt=receipt, position=position)
+        oid = receipt.get("oid")
+        status = str(receipt.get("status", "unknown"))
+        message = str(receipt.get("message", "")).strip()
+        detail_parts = [action]
+        if role != "unknown":
+            detail_parts.append(role)
+        if oid is not None:
+            detail_parts.append(f"oid={oid}")
+        if status and status != "unknown":
+            detail_parts.append(f"status={status}")
+
+        if self._receipt_is_error(receipt):
+            if message:
+                detail_parts.append(f"reason=\"{message}\"")
+            return self._event_line("ERROR", " | ".join([detail_parts[0], " ".join(detail_parts[1:])]).strip())
+
+        return self._event_line("ORDER", " ".join(detail_parts))
+
+    def _render_fill_events(self, *, snapshot: LiveStateSnapshot) -> list[str]:
+        lines: list[str] = []
+        for fill in snapshot.recent_fills:
+            key = self._fill_key(fill)
+            if key in self._seen_fill_keys:
+                continue
+            self._seen_fill_keys.add(key)
+            lines.append(self._event_line("FILL", self._describe_fill(fill)))
+        return lines
+
+    def _render_user_events(self, *, snapshot: LiveStateSnapshot) -> list[str]:
+        lines: list[str] = []
+        for event in snapshot.recent_user_events:
+            if event.coin not in {None, self.symbol}:
+                continue
+            key = self._user_event_key(event)
+            if key in self._seen_user_event_keys:
+                continue
+            self._seen_user_event_keys.add(key)
+            if event.event_type == UserEventType.OTHER:
+                continue
+            lines.append(self._event_line("ERROR", self._describe_user_event(event)))
+        return lines
+
+    def _render_external_order_events(
+        self,
+        *,
+        position: PositionState,
+        first_cycle: bool,
+        has_local_order_event: bool,
+    ) -> list[str]:
+        current = self._active_order_signature(position)
+        previous = self._last_active_order_signature
+        self._last_active_order_signature = current
+        if first_cycle or has_local_order_event or previous == current:
+            return []
+        return [
+            self._event_line(
+                "STATE",
+                f"open-order set changed without local action | count={position.open_orders}",
+            )
+        ]
+
+    def _render_position_events(
+        self,
+        *,
+        position: PositionState,
+        first_cycle: bool,
+    ) -> list[str]:
+        signature = self._position_signature(position)
+        previous = self._last_position_signature
+        self._last_position_signature = signature
+        if first_cycle:
+            if position.side == TradeSide.FLAT and position.open_orders == 0:
+                return []
+            return [self._event_line("POSITION", self._describe_position(position))]
+        if previous == signature:
+            return []
+        return [self._event_line("POSITION", self._describe_position(position))]
+
+    def _print_event_block(
+        self,
+        *,
+        cycle: int,
+        snapshot: LiveStateSnapshot,
+        position: PositionState,
+        lines: list[str],
+    ) -> None:
+        self._event_block_count += 1
+        review_id = f"R{self._event_block_count:04d}"
+        self.console.print(_LOG_DIVIDER)
+        self.console.print(
+            " | ".join(
+                [
+                    f"REVIEW {review_id}",
+                    f"cycle={cycle}",
+                    self.symbol,
+                    self._fmt_time(snapshot.order_book.captured_at),
+                    f"mid={self._fmt_price(snapshot.order_book.mid_price)}",
+                    f"pos={position.side.value}",
+                    f"oo={position.open_orders}",
+                ]
+            )
+        )
+        for line in lines:
+            self.console.print(line)
+        self.console.print(_LOG_DIVIDER)
+
+    def _emit_runtime_error(
+        self,
+        *,
+        phase: str,
+        cycle: int | None,
+        exc: Exception,
+    ) -> None:
+        self._event_block_count += 1
+        review_id = f"R{self._event_block_count:04d}"
+        self.console.print(_LOG_DIVIDER)
+        header = [
+            f"REVIEW {review_id}",
+            self.symbol,
+            self._fmt_time(datetime.now(tz=UTC)),
+            f"phase={phase}",
+        ]
+        if cycle is not None:
+            header.insert(1, f"cycle={cycle}")
+        self.console.print(" | ".join(header))
+        self.console.print(
+            self._event_line(
+                "ERROR",
+                f"{type(exc).__name__}: {exc}",
+            )
+        )
+        self.console.print(_LOG_DIVIDER)
+
+    def _seed_seen_events(self, snapshot: LiveStateSnapshot) -> None:
+        self._seen_fill_keys = {self._fill_key(fill) for fill in snapshot.recent_fills}
+        self._seen_user_event_keys = {
+            self._user_event_key(event) for event in snapshot.recent_user_events
+        }
+
+    @staticmethod
+    def _event_line(label: str, message: str) -> str:
+        return f"{label:<9}{message}"
+
+    @staticmethod
+    def _plan_is_actionable(plan: TradePlan) -> bool:
+        if plan.resting_orders:
+            return True
+        return plan.playbook != Playbook.NO_TRADE and plan.side != TradeSide.FLAT
+
+    def _describe_plan(self, plan: TradePlan) -> tuple[str, str]:
+        if plan.resting_orders:
+            order = plan.resting_orders[0]
+            summary = (
+                f"{plan.playbook.value} rest-{order.side.value} "
+                f"entry={self._fmt_price(order.entry_band[0])}-{self._fmt_price(order.entry_band[1])} "
+                f"sl={self._fmt_price(order.invalid_if)} "
+                f"tp={self._fmt_price(order.tp1)}/{self._fmt_price(order.tp2)} "
+                f"ttl={order.ttl_min}m conf={order.touch_confidence:.2f}"
+            )
+            reason = plan.reason
+            if order.reason != plan.reason:
+                reason = f"{plan.reason}; order={order.reason}"
+            return summary, reason
+        if plan.playbook == Playbook.NO_TRADE or plan.side == TradeSide.FLAT:
+            return "no_trade", plan.reason
+        summary = (
+            f"{plan.playbook.value} {plan.side.value} "
+            f"entry={self._fmt_price(plan.entry_band[0])}-{self._fmt_price(plan.entry_band[1])} "
+            f"sl={self._fmt_price(plan.invalid_if)} "
+            f"tp={self._fmt_price(plan.tp1)}/{self._fmt_price(plan.tp2)} "
+            f"ttl={plan.ttl_min}m conf={plan.touch_confidence:.2f}"
+        )
+        return summary, plan.reason
+
+    @staticmethod
+    def _receipt_is_error(receipt: dict[str, object]) -> bool:
+        success = bool(receipt.get("success", False))
+        decision = str(receipt.get("decision", ""))
+        status = str(receipt.get("status", ""))
+        return (
+            not success
+            or decision == "await_resolution"
+            or status in {"rejected", "unknown"}
+        )
+
+    def _receipt_role_label(
+        self,
+        *,
+        receipt: dict[str, object],
+        position: PositionState,
+    ) -> str:
+        cloid = receipt.get("cloid")
+        role = extract_role_from_cloid(cloid if isinstance(cloid, str) else None)
+        if role == OrderRole.UNKNOWN:
+            oid = receipt.get("oid")
+            for order in position.active_orders:
+                if isinstance(oid, int) and order.oid == oid:
+                    role = order.role
+                    break
+                if isinstance(cloid, str) and order.cloid == cloid:
+                    role = order.role
+                    break
+        return role.value
+
+    def _describe_fill(self, fill: object) -> str:
+        direction = str(getattr(fill, "direction", "fill")).strip() or "fill"
+        price = self._fmt_price(getattr(fill, "price", None))
+        size = self._fmt_size(getattr(fill, "size", None))
+        parts = [direction, f"qty={size}", f"px={price}"]
+        closed_pnl = getattr(fill, "closed_pnl", None)
+        if isinstance(closed_pnl, (int, float)) and closed_pnl != 0:
+            parts.append(f"pnl={closed_pnl:+.2f}")
+        oid = getattr(fill, "oid", None)
+        if oid is not None:
+            parts.append(f"oid={oid}")
+        return " ".join(parts)
+
+    def _describe_user_event(self, event: object) -> str:
+        if getattr(event, "event_type", UserEventType.OTHER) == UserEventType.LIQUIDATION:
+            label = "liquidation reported"
+        elif getattr(event, "event_type", UserEventType.OTHER) == UserEventType.NON_USER_CANCEL:
+            label = "non-user cancel reported"
+        else:
+            label = "user event reported"
+        coin = getattr(event, "coin", None)
+        timestamp = getattr(event, "timestamp", None)
+        parts = [label]
+        if coin:
+            parts.append(f"coin={coin}")
+        if isinstance(timestamp, datetime):
+            parts.append(f"at={self._fmt_time(timestamp)}")
+        return " ".join(parts)
+
+    def _describe_position(self, position: PositionState) -> str:
+        if position.side == TradeSide.FLAT:
+            return f"flat qty=0 open_orders={position.open_orders}"
+        parts = [
+            f"{position.side.value}",
+            f"qty={self._fmt_size(position.quantity)}",
+        ]
+        if position.entry_price is not None:
+            parts.append(f"entry={self._fmt_price(position.entry_price)}")
+        if position.unrealized_pnl is not None:
+            parts.append(f"uPnL={position.unrealized_pnl:+.2f}")
+        if position.liquidation_price is not None:
+            parts.append(f"liq={self._fmt_price(position.liquidation_price)}")
+        parts.append(f"open_orders={position.open_orders}")
+        return " ".join(parts)
+
+    def _plan_signature(self, plan: TradePlan) -> tuple[object, ...]:
+        resting_signature = tuple(
+            (
+                order.side.value,
+                self._fmt_price(order.entry_band[0]),
+                self._fmt_price(order.entry_band[1]),
+                self._fmt_price(order.invalid_if),
+                self._fmt_price(order.tp1),
+                self._fmt_price(order.tp2),
+                order.ttl_min,
+                round(order.touch_confidence, 2),
+                order.reason,
+            )
+            for order in plan.resting_orders
+        )
+        return (
+            plan.playbook.value,
+            plan.side.value,
+            self._fmt_price(plan.entry_band[0]),
+            self._fmt_price(plan.entry_band[1]),
+            self._fmt_price(plan.invalid_if),
+            self._fmt_price(plan.tp1),
+            self._fmt_price(plan.tp2),
+            plan.ttl_min,
+            round(plan.touch_confidence, 2),
+            plan.reason,
+            resting_signature,
+        )
+
+    def _position_signature(self, position: PositionState) -> tuple[object, ...]:
+        return (
+            position.side.value,
+            self._fmt_size(position.quantity),
+            self._fmt_price(position.entry_price),
+            self._fmt_price(position.liquidation_price),
+        )
+
+    def _active_order_signature(self, position: PositionState) -> tuple[tuple[object, ...], ...]:
+        return tuple(
+            sorted(
+                (
+                    order.cloid or f"oid:{order.oid}",
+                    order.role.value,
+                    order.side,
+                    self._fmt_price(order.limit_price),
+                    self._fmt_price(order.trigger_price),
+                    self._fmt_size(order.size),
+                    order.reduce_only,
+                    order.status.value,
+                )
+                for order in position.active_orders
+            )
+        )
+
+    @staticmethod
+    def _fill_key(fill: object) -> str:
+        fill_hash = getattr(fill, "fill_hash", None)
+        if isinstance(fill_hash, str) and fill_hash:
+            return fill_hash
+        oid = getattr(fill, "oid", None)
+        time_value = getattr(fill, "time", None)
+        price = getattr(fill, "price", None)
+        size = getattr(fill, "size", None)
+        direction = getattr(fill, "direction", None)
+        closed_pnl = getattr(fill, "closed_pnl", None)
+        return "|".join(str(part) for part in (oid, time_value, price, size, direction, closed_pnl))
+
+    @staticmethod
+    def _user_event_key(event: object) -> str:
+        return "|".join(
+            str(part)
+            for part in (
+                getattr(event, "event_type", None),
+                getattr(event, "coin", None),
+                getattr(event, "timestamp", None),
+                getattr(event, "oid", None),
+                getattr(event, "cloid", None),
+            )
+        )
+
+    @staticmethod
+    def _fmt_time(value: datetime) -> str:
+        return value.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%SZ")
+
+    @staticmethod
+    def _fmt_price(value: float | None) -> str:
+        if value is None:
+            return "-"
+        magnitude = abs(value)
+        if magnitude >= 1_000:
+            return f"{value:.1f}"
+        if magnitude >= 100:
+            return f"{value:.2f}"
+        if magnitude >= 1:
+            return f"{value:.3f}".rstrip("0").rstrip(".")
+        return f"{value:.6f}".rstrip("0").rstrip(".")
+
+    @staticmethod
+    def _fmt_size(value: float | None) -> str:
+        if value is None:
+            return "-"
+        return f"{value:.4f}".rstrip("0").rstrip(".")
+
+    @staticmethod
+    def _short_address(value: str) -> str:
+        if len(value) <= 12:
+            return value
+        return f"{value[:6]}...{value[-4:]}"
 
     def _paper_mark_market(
         self,
