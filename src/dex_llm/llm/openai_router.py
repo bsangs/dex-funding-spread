@@ -141,6 +141,7 @@ class OpenAIRouter:
         last_error: Exception | None = None
         attempts = max(1, self.max_attempts)
         token_budget = max(self.max_output_tokens, 2_700)
+        reasoning_effort = self._effective_reasoning_effort()
         for attempt_index in range(attempts):
             timeout_budget = max(self.timeout_s * (2 + attempt_index * 2), 60)
             try:
@@ -152,7 +153,7 @@ class OpenAIRouter:
                     timeout=timeout_budget,
                     max_output_tokens=token_budget,
                     reasoning={
-                        "effort": self.reasoning_effort,
+                        "effort": reasoning_effort,
                         "summary": self.reasoning_summary,
                     },
                     store=self.store,
@@ -211,6 +212,11 @@ class OpenAIRouter:
                 if isinstance(nested, OpenAITradePlan):
                     return nested
         return None
+
+    def _effective_reasoning_effort(self) -> str:
+        if self.reasoning_effort in {"high", "xhigh"}:
+            return "low"
+        return self.reasoning_effort
 
     @staticmethod
     def _flat_plan(reason: str) -> TradePlan:

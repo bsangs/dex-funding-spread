@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 from dex_llm.features.extractor import FeatureExtractor
-from dex_llm.llm.prompting import build_router_input, render_router_prompt
+from dex_llm.llm.prompting import build_router_input, build_router_payload, render_router_prompt
 from dex_llm.models import MarketFrame
 
 
@@ -74,3 +74,68 @@ def test_router_input_falls_back_to_remote_heatmap_url() -> None:
     assert isinstance(content, list)
     assert content[1]["type"] == "input_image"
     assert content[1]["image_url"] == "https://example.com/eth-heatmap.png"
+
+
+def test_router_payload_filters_heatmap_to_relevant_subset() -> None:
+    frame = load_sample_frame()
+    current = frame.current_price
+    frame.metadata["heatmap_metadata"] = {
+        "levels_above": [
+            {"price": current + 5 + index, "size": 10 + index, "orders": 1}
+            for index in range(10)
+        ]
+        + [
+            {"price": current + 400 + index, "size": 1000 + index, "orders": 2}
+            for index in range(20)
+        ],
+        "levels_below": [
+            {"price": current - 5 - index, "size": 10 + index, "orders": 1}
+            for index in range(10)
+        ]
+        + [
+            {"price": current - 400 - index, "size": 1000 + index, "orders": 2}
+            for index in range(20)
+        ],
+        "positions": [
+            {
+                "liquidation_price": current + 3 + index,
+                "position_usd": 1000 + index,
+                "direction": "short",
+            }
+            for index in range(12)
+        ]
+        + [
+            {
+                "liquidation_price": current + 500 + index,
+                "position_usd": 5000 + index,
+                "direction": "short",
+            }
+            for index in range(30)
+        ]
+        + [
+            {
+                "liquidation_price": current - 3 - index,
+                "position_usd": 1200 + index,
+                "direction": "long",
+            }
+            for index in range(12)
+        ]
+        + [
+            {
+                "liquidation_price": current - 500 - index,
+                "position_usd": 6000 + index,
+                "direction": "long",
+            }
+            for index in range(30)
+        ],
+    }
+
+    payload = build_router_payload(frame, FeatureExtractor().extract(frame))
+
+    assert payload["heatmap_levels_above_count"] == 30
+    assert payload["heatmap_levels_below_count"] == 30
+    assert payload["heatmap_positions_count"] == 84
+    assert isinstance(payload["heatmap_positions"], list)
+    assert len(payload["heatmap_positions"]) < 84
+    assert isinstance(payload["heatmap_levels_above_detailed"], list)
+    assert len(payload["heatmap_levels_above_detailed"]) < 30

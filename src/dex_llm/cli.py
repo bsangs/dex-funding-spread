@@ -659,9 +659,13 @@ def execute_live(
             user_address=resolved_user,
         )
         executor.verify_signer()
+        target_leverage = min(
+            executor.target_leverage_for_side(plan.side),
+            max(1, int(account.max_leverage)),
+        )
         leverage_preflight = executor.apply_leverage_preflight(
             symbol=symbol,
-            target_leverage=executor.target_leverage_for_side(plan.side),
+            target_leverage=target_leverage,
             margin_mode=settings.margin_mode,
             current_leverage=frame.position.live_leverage,
             max_leverage=account.max_leverage,

@@ -19,6 +19,9 @@ def build_router_payload(
     heatmap_metadata = frame.metadata.get("heatmap_metadata")
     if not isinstance(heatmap_metadata, dict):
         heatmap_metadata = {}
+    levels_above = heatmap_metadata.get("levels_above")
+    levels_below = heatmap_metadata.get("levels_below")
+    positions = heatmap_metadata.get("positions")
     return {
         "exchange": frame.exchange,
         "symbol": frame.symbol,
@@ -35,9 +38,30 @@ def build_router_payload(
         "clusters_below": [
             cluster.model_dump(mode="json") for cluster in frame.clusters_below
         ],
-        "heatmap_levels_above_detailed": heatmap_metadata.get("levels_above"),
-        "heatmap_levels_below_detailed": heatmap_metadata.get("levels_below"),
-        "heatmap_positions": heatmap_metadata.get("positions"),
+        "heatmap_prompt_window_abs": round(
+            _heatmap_prompt_window(current_price=frame.current_price, atr=frame.atr),
+            2,
+        ),
+        "heatmap_levels_above_count": len(levels_above) if isinstance(levels_above, list) else 0,
+        "heatmap_levels_below_count": len(levels_below) if isinstance(levels_below, list) else 0,
+        "heatmap_positions_count": len(positions) if isinstance(positions, list) else 0,
+        "heatmap_levels_above_detailed": _filter_heatmap_levels(
+            levels_above,
+            current_price=frame.current_price,
+            atr=frame.atr,
+            side="above",
+        ),
+        "heatmap_levels_below_detailed": _filter_heatmap_levels(
+            levels_below,
+            current_price=frame.current_price,
+            atr=frame.atr,
+            side="below",
+        ),
+        "heatmap_positions": _filter_heatmap_positions(
+            positions,
+            current_price=frame.current_price,
+            atr=frame.atr,
+        ),
         "higher_timeframe_levels": frame.metadata.get("higher_timeframe_levels"),
         "entry_candidates": [
             candidate.model_dump(mode="json") for candidate in features.entry_candidates
@@ -63,6 +87,128 @@ def render_router_prompt(
         f"{json.dumps(payload, ensure_ascii=True, indent=2)}\n"
         "```"
     )
+
+
+def _heatmap_prompt_window(*, current_price: float, atr: float) -> float:
+    return max(atr * 8.0, current_price * 0.03, 25.0)
+
+
+def _filter_heatmap_levels(
+    levels: object,
+    *,
+    current_price: float,
+    atr: float,
+    side: str,
+    near_limit: int = 12,
+    strong_limit: int = 8,
+) -> list[dict[str, object]] | None:
+    if not isinstance(levels, list):
+        return None
+    window = _heatmap_prompt_window(current_price=current_price, atr=atr)
+    normalized: list[tuple[float, float, dict[str, object]]] = []
+    for item in levels:
+        if not isinstance(item, dict):
+            continue
+        price = _as_float(item.get("price"))
+        if price is None:
+            continue
+        size = _as_float(item.get("size")) or 0.0
+        normalized.append((price, size, dict(item)))
+
+    near_items = [
+        entry for entry in normalized if abs(entry[0] - current_price) <= window
+    ]
+    near_items.sort(key=lambda entry: (abs(entry[0] - current_price), -entry[1]))
+
+    strong_items = sorted(
+        normalized,
+        key=lambda entry: (-entry[1], abs(entry[0] - current_price)),
+    )
+
+    selected: dict[float, dict[str, object]] = {}
+    for price, _, item in near_items[:near_limit]:
+        selected[price] = item
+    for price, _, item in strong_items[:strong_limit]:
+        selected.setdefault(price, item)
+
+    filtered = list(selected.values())
+    filtered.sort(
+        key=lambda item: _level_sort_key(
+            item=item,
+            current_price=current_price,
+            side=side,
+        )
+    )
+    return filtered
+
+
+def _filter_heatmap_positions(
+    positions: object,
+    *,
+    current_price: float,
+    atr: float,
+    near_limit: int = 18,
+    strong_per_side: int = 8,
+    max_total: int = 28,
+) -> list[dict[str, object]] | None:
+    if not isinstance(positions, list):
+        return None
+    window = _heatmap_prompt_window(current_price=current_price, atr=atr)
+    normalized: list[tuple[float, float, dict[str, object]]] = []
+    for item in positions:
+        if not isinstance(item, dict):
+            continue
+        price = _as_float(item.get("liquidation_price"))
+        if price is None:
+            continue
+        weight = abs(_as_float(item.get("position_usd")) or 0.0)
+        normalized.append((price, weight, dict(item)))
+
+    near_items = [
+        entry for entry in normalized if abs(entry[0] - current_price) <= window
+    ]
+    near_items.sort(key=lambda entry: (abs(entry[0] - current_price), -entry[1]))
+
+    above = [entry for entry in normalized if entry[0] >= current_price]
+    below = [entry for entry in normalized if entry[0] < current_price]
+    above.sort(key=lambda entry: (-entry[1], abs(entry[0] - current_price)))
+    below.sort(key=lambda entry: (-entry[1], abs(entry[0] - current_price)))
+
+    selected: dict[tuple[float, float], dict[str, object]] = {}
+    for price, weight, item in near_items[:near_limit]:
+        selected[(price, weight)] = item
+    for bucket in (above[:strong_per_side], below[:strong_per_side]):
+        for price, weight, item in bucket:
+            selected.setdefault((price, weight), item)
+
+    filtered = list(selected.values())
+    filtered.sort(
+        key=lambda item: (
+            abs((_as_float(item.get("liquidation_price")) or current_price) - current_price),
+            -abs(_as_float(item.get("position_usd")) or 0.0),
+        )
+    )
+    return filtered[:max_total]
+
+
+def _level_sort_key(
+    *,
+    item: dict[str, object],
+    current_price: float,
+    side: str,
+) -> tuple[float, float]:
+    price = _as_float(item.get("price")) or current_price
+    if side == "below":
+        return (-price, abs(price - current_price))
+    return (price, abs(price - current_price))
+
+
+def _as_float(value: object) -> float | None:
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str) and value:
+        return float(value)
+    return None
 
 
 def build_router_input(

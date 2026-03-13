@@ -260,6 +260,80 @@ def test_bot_runtime_returns_receipt_when_live_leverage_preflight_is_invalid() -
     assert receipts[0]["status"] == "rejected"
 
 
+def test_bot_runtime_clamps_target_leverage_to_account_max() -> None:
+    runtime = object.__new__(BotRuntime)
+    runtime.live = True
+    runtime.symbol = "ETH"
+
+    class StubExecutor:
+        target_leverage = 20
+        margin_mode = "isolated"
+
+        def build_orders_from_plan(self, **_: object) -> list[object]:
+            return [type("Order", (), {"reduce_only": False})()]
+
+        def target_leverage_for_side(self, _: TradeSide) -> int:
+            return self.target_leverage
+
+        def apply_leverage_preflight(self, **kwargs: object):
+            assert kwargs["target_leverage"] == 10
+            return type(
+                "ValidationResult",
+                (),
+                {
+                    "valid": True,
+                    "reason": "ok",
+                    "model_dump": lambda self, mode="json": {"valid": True, "reason": "ok"},
+                },
+            )()
+
+        def execute_plan(self, **_: object):
+            return []
+
+    runtime.executor = StubExecutor()
+
+    receipts, leverage_preflight = runtime._sync_orders(
+        snapshot=type(
+            "Snapshot",
+            (),
+            {
+                "order_book": type(
+                    "Book",
+                    (),
+                    {
+                        "best_bid": 2100.0,
+                        "best_ask": 2101.0,
+                    },
+                )(),
+                "active_asset_ctx": type("Ctx", (), {"oracle_price": 2100.5})(),
+                "captured_at": datetime.now(tz=UTC),
+            },
+        )(),
+        position=PositionState(),
+        account=AccountState(equity=200.0, available_margin=200.0, max_leverage=10.0),
+        plan=TradePlan(
+            playbook=Playbook.SWEEP_RECLAIM,
+            side=TradeSide.SHORT,
+            entry_band=(2099.0, 2100.0),
+            invalid_if=2105.0,
+            tp1=2090.0,
+            tp2=2080.0,
+            ttl_min=12,
+            reason="test",
+        ),
+        risk=RiskAssessment(
+            allowed=True,
+            reason="ok",
+            recommended_quantity=0.1,
+            recommended_notional=100.0,
+            risk_budget=1.0,
+        ),
+    )
+
+    assert receipts == []
+    assert leverage_preflight == {"valid": True, "reason": "ok"}
+
+
 def test_bot_runtime_only_refreshes_after_strategy_interval() -> None:
     runtime = object.__new__(BotRuntime)
     runtime._strategy_state = StrategyState(
@@ -430,6 +504,34 @@ def test_bot_runtime_skips_router_when_position_is_open() -> None:
     assert "code-managed" in state.plan.reason
 
 
+def test_account_from_snapshot_clamps_to_venue_max_leverage() -> None:
+    runtime = object.__new__(BotRuntime)
+    runtime.live = True
+    runtime.max_leverage = 20.0
+    now = datetime.now(tz=UTC)
+
+    account = runtime._account_from_snapshot(
+        type(
+            "Snapshot",
+            (),
+            {
+                "clearinghouse_state": type(
+                    "State",
+                    (),
+                    {
+                        "margin_summary": type("Margin", (), {"account_value": 500.0})(),
+                        "withdrawable": 450.0,
+                    },
+                )(),
+                "active_asset_ctx": type("Ctx", (), {"max_leverage": 10.0})(),
+                "order_book": type("Book", (), {"mid_price": 2100.0})(),
+            },
+        )()
+    )
+
+    assert account.max_leverage == 10.0
+
+
 def test_bot_runtime_emit_cycle_suppresses_idle_cycles_after_boot() -> None:
     buffer = io.StringIO()
     runtime = _logging_runtime(console=Console(file=buffer, force_terminal=False, width=120))
@@ -519,6 +621,47 @@ def test_bot_runtime_emit_cycle_groups_eventful_cycle_into_review_block() -> Non
     assert "WHY" in output
     assert "ORDER" in output
     assert "place entry oid=12345 status=open" in output
+
+
+def test_bot_runtime_treats_grouped_submit_as_order_not_error() -> None:
+    buffer = io.StringIO()
+    runtime = _logging_runtime(console=Console(file=buffer, force_terminal=False, width=120))
+    now = datetime.now(tz=UTC)
+    plan = TradePlan(
+        playbook=Playbook.CLUSTER_FADE,
+        side=TradeSide.SHORT,
+        entry_band=(2152.0, 2154.0),
+        invalid_if=2160.0,
+        tp1=2140.0,
+        tp2=2128.0,
+        ttl_min=40,
+        reason="short fade",
+    )
+
+    runtime._emit_cycle(
+        cycle=1,
+        snapshot=_snapshot(now=now),
+        position=PositionState(),
+        plan=plan,
+        risk=RiskAssessment(allowed=True, reason="ok"),
+        kill_switch=KillSwitchStatus(),
+        receipts=[
+            {
+                "action": "place",
+                "cloid": "0x2200feedfacefeedfacefeedfacefeed",
+                "oid": None,
+                "decision": "place",
+                "success": True,
+                "status": "unknown",
+                "message": "grouped order submitted",
+            }
+        ],
+        meta=_meta(),
+    )
+
+    output = buffer.getvalue()
+    assert "ORDER" in output
+    assert "grouped order submitted" not in output or "ERROR" not in output
 
 
 def test_bot_runtime_emit_cycle_keeps_printing_errors_when_error_persists() -> None:

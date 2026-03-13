@@ -463,9 +463,13 @@ class BotRuntime:
         needs_entry_work = any(not order.reduce_only for order in desired_orders)
         leverage_preflight = None
         if self.live and needs_entry_work and position.side == TradeSide.FLAT:
+            target_leverage = min(
+                self.executor.target_leverage_for_side(plan.side),
+                max(1, int(account.max_leverage)),
+            )
             leverage_result = self.executor.apply_leverage_preflight(
                 symbol=self.symbol,
-                target_leverage=self.executor.target_leverage_for_side(plan.side),
+                target_leverage=target_leverage,
                 margin_mode=self.executor.margin_mode,
                 current_leverage=position.live_leverage,
                 max_leverage=account.max_leverage,
@@ -557,10 +561,18 @@ class BotRuntime:
         )
         if available_margin <= 0:
             available_margin = equity
+        venue_max_leverage = (
+            snapshot.active_asset_ctx.max_leverage
+            if snapshot.active_asset_ctx is not None
+            else None
+        )
+        resolved_max_leverage = self.max_leverage
+        if isinstance(venue_max_leverage, (int, float)) and venue_max_leverage > 0:
+            resolved_max_leverage = min(self.max_leverage, float(venue_max_leverage))
         base_account = AccountState(
             equity=equity,
             available_margin=available_margin,
-            max_leverage=self.max_leverage,
+            max_leverage=resolved_max_leverage,
         )
         if not self.live:
             return self.paper_broker.account_state(
@@ -999,7 +1011,7 @@ class BotRuntime:
         return (
             not success
             or decision == "await_resolution"
-            or status in {"rejected", "unknown"}
+            or status == "rejected"
         )
 
     def _receipt_role_label(

@@ -202,7 +202,7 @@ def test_openai_router_accepts_custom_response_settings() -> None:
     assert router.client.responses.last_kwargs is not None
     assert router.client.responses.last_kwargs["text"] == {"verbosity": "high"}
     assert router.client.responses.last_kwargs["reasoning"] == {
-        "effort": "high",
+        "effort": "low",
         "summary": "detailed",
     }
     assert router.client.responses.last_kwargs["store"] is False
