@@ -16,6 +16,9 @@ def build_router_payload(
     frame: MarketFrame,
     features: FeatureSnapshot,
 ) -> dict[str, object]:
+    heatmap_metadata = frame.metadata.get("heatmap_metadata")
+    if not isinstance(heatmap_metadata, dict):
+        heatmap_metadata = {}
     return {
         "exchange": frame.exchange,
         "symbol": frame.symbol,
@@ -26,12 +29,15 @@ def build_router_payload(
         "heatmap_image_url": frame.heatmap_image_url,
         "sweep": frame.sweep.model_dump(mode="json"),
         "kill_switch": frame.kill_switch.model_dump(mode="json"),
-        "top_clusters_above": [
-            cluster.model_dump(mode="json") for cluster in frame.clusters_above[:3]
+        "clusters_above": [
+            cluster.model_dump(mode="json") for cluster in frame.clusters_above
         ],
-        "top_clusters_below": [
-            cluster.model_dump(mode="json") for cluster in frame.clusters_below[:3]
+        "clusters_below": [
+            cluster.model_dump(mode="json") for cluster in frame.clusters_below
         ],
+        "heatmap_levels_above_detailed": heatmap_metadata.get("levels_above"),
+        "heatmap_levels_below_detailed": heatmap_metadata.get("levels_below"),
+        "heatmap_positions": heatmap_metadata.get("positions"),
         "higher_timeframe_levels": frame.metadata.get("higher_timeframe_levels"),
         "entry_candidates": [
             candidate.model_dump(mode="json") for candidate in features.entry_candidates

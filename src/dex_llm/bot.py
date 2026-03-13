@@ -56,7 +56,7 @@ class BotRuntime:
         executor: HyperliquidExchangeExecutor,
         risk_policy: RiskPolicy,
         max_leverage: float,
-        strategy_interval_s: int = 300,
+        strategy_interval_s: int = 900,
         sync_interval_s: int = 120,
         live: bool = False,
         execution_mode_live: bool = False,

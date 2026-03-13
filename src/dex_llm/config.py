@@ -41,7 +41,7 @@ class AppSettings(BaseSettings):
     heatmap_cache_dir: Path = Path("data/heatmaps")
     request_timeout_s: float = 10.0
     coinglass_scrape_timeout_s: float = 20.0
-    bot_strategy_interval_s: int = 300
+    bot_strategy_interval_s: int = 900
     bot_sync_interval_s: int = 120
     kill_switch_max_info_latency_ms: float = 1_500.0
     kill_switch_max_private_latency_ms: float = 1_500.0

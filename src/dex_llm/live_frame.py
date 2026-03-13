@@ -285,8 +285,8 @@ class LiveFrameBuilder:
             candles_15m=candles_15m[-30:],
             candles_1h=candles_1h[-48:],
             candles_4h=candles_4h[-30:],
-            clusters_above=heatmap_snapshot.clusters_above[:3],
-            clusters_below=heatmap_snapshot.clusters_below[:3],
+            clusters_above=heatmap_snapshot.clusters_above,
+            clusters_below=heatmap_snapshot.clusters_below,
             atr=max(compute_atr(candles_15m), 1.0),
             heatmap_path=(
                 heatmap_snapshot.heatmap_image_path
@@ -447,8 +447,8 @@ class LiveFrameBuilder:
             candles_15m=snapshot.candles_15m[-30:],
             candles_1h=snapshot.candles_1h[-48:],
             candles_4h=snapshot.candles_4h[-30:],
-            clusters_above=heatmap_snapshot.clusters_above[:3],
-            clusters_below=heatmap_snapshot.clusters_below[:3],
+            clusters_above=heatmap_snapshot.clusters_above,
+            clusters_below=heatmap_snapshot.clusters_below,
             atr=max(compute_atr(snapshot.candles_15m), 1.0),
             heatmap_path=(
                 heatmap_snapshot.heatmap_image_path

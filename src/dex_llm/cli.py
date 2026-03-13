@@ -22,6 +22,7 @@ from dex_llm.features.extractor import FeatureExtractor
 from dex_llm.integrations.coinglass import (
     CoinGlassFallbackHeatmapClient,
     CoinGlassHeatmapClient,
+    CoinGlassHyperliquidLiqMapClient,
     CoinGlassLiquidationsPageClient,
 )
 from dex_llm.integrations.hyperliquid import HyperliquidInfoClient
@@ -86,6 +87,10 @@ def _build_kill_switch_policy(settings: AppSettings) -> KillSwitchPolicy:
 
 
 def _build_heatmap_client(settings: AppSettings) -> object | None:
+    liq_map_primary = CoinGlassHyperliquidLiqMapClient(
+        timeout_s=settings.request_timeout_s,
+        cache_dir=settings.heatmap_cache_dir,
+    )
     primary = None
     if settings.coinglass_api_key:
         primary = CoinGlassHeatmapClient(
@@ -102,9 +107,12 @@ def _build_heatmap_client(settings: AppSettings) -> object | None:
             timeout_s=settings.coinglass_scrape_timeout_s,
             cache_dir=settings.heatmap_cache_dir,
         )
-    if primary is None and fallback is None:
-        return None
-    return CoinGlassFallbackHeatmapClient(primary, fallback)
+    secondary: object | None = None
+    if primary is not None or fallback is not None:
+        secondary = CoinGlassFallbackHeatmapClient(primary, fallback)
+    if secondary is None:
+        return liq_map_primary
+    return CoinGlassFallbackHeatmapClient(liq_map_primary, secondary)
 
 
 def _build_router(settings: AppSettings) -> RouterProtocol:

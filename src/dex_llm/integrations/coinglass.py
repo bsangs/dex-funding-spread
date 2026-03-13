@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import base64
+import gzip
 import json
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
+from time import time
 from urllib.parse import urlparse
 
 import httpx
+from Crypto.Cipher import AES
+from Crypto.Util.Padding import unpad
 from playwright.sync_api import (
     Page,
     sync_playwright,
@@ -18,6 +23,229 @@ from playwright.sync_api import (
 from dex_llm.models import Cluster, ClusterShape, ClusterSide, HeatmapSnapshot
 
 MAX_HEATMAP_CACHE_FILES = 10
+
+
+class CoinGlassHyperliquidLiqMapClient:
+    def __init__(
+        self,
+        *,
+        base_url: str = "https://capi.coinglass.com",
+        liq_map_path: str = "/api/hyperliquid/topPosition/liqMap",
+        timeout_s: float = 10.0,
+        cache_dir: Path = Path("data/heatmaps"),
+        transport: httpx.BaseTransport | None = None,
+        obe: str | None = None,
+        language: str = "en",
+    ) -> None:
+        self.base_url = base_url
+        self.liq_map_path = liq_map_path
+        self.cache_dir = cache_dir
+        self.obe = obe
+        self.language = language
+        self.user_agent = (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/145.0.0.0 Safari/537.36"
+        )
+        self._client = httpx.Client(
+            base_url=base_url,
+            timeout=timeout_s,
+            transport=transport,
+        )
+
+    def close(self) -> None:
+        self._client.close()
+
+    def fetch_heatmap(
+        self,
+        symbol: str,
+        extra_params: Mapping[str, str] | None = None,
+        cache_image: bool = True,
+    ) -> HeatmapSnapshot:
+        _ = cache_image
+        params = dict(extra_params or {})
+        params["symbol"] = symbol.upper()
+        response = self._client.get(
+            self.liq_map_path,
+            params=params,
+            headers=self._request_headers(),
+        )
+        response.raise_for_status()
+        payload = response.json()
+        decoded = self._decode_encrypted_response(payload, response.headers)
+        snapshot = self.parse_liq_map_payload(symbol=symbol.upper(), payload=decoded)
+        raw_path = self._write_raw_payload(symbol.upper(), decoded, prefix="coinglass-hl-liqmap")
+        return snapshot.model_copy(update={"raw_path": raw_path})
+
+    def parse_liq_map_payload(self, *, symbol: str, payload: object) -> HeatmapSnapshot:
+        if not isinstance(payload, dict):
+            raise ValueError("Unexpected CoinGlass Hyperliquid liqMap payload")
+        current_price = _coerce_float(payload.get("price"))
+        positions = payload.get("list")
+        if not isinstance(positions, list):
+            raise ValueError("liqMap payload missing list")
+        below_levels: dict[float, dict[str, float]] = {}
+        above_levels: dict[float, dict[str, float]] = {}
+        detailed_positions: list[dict[str, object]] = []
+        latest_timestamp: datetime | None = None
+        for item in positions:
+            if not isinstance(item, dict):
+                continue
+            liquidation_price = _coerce_float(item.get("liquidationPrice"))
+            if liquidation_price is None or liquidation_price <= 0:
+                continue
+            weight = abs(
+                _coerce_float(item.get("positionUsd"))
+                or _coerce_float(item.get("margin"))
+                or _coerce_float(item.get("size"))
+                or 0.0
+            )
+            if weight <= 0:
+                continue
+            update_time = _extract_timestamp_value(item.get("updateTime"))
+            if (
+                update_time is not None
+                and (latest_timestamp is None or update_time > latest_timestamp)
+            ):
+                latest_timestamp = update_time
+            target = below_levels if liquidation_price < current_price else above_levels
+            bucket = target.setdefault(liquidation_price, {"size": 0.0, "orders": 0.0})
+            bucket["size"] += weight
+            bucket["orders"] += 1
+            detailed_positions.append(
+                {
+                    "liquidation_price": liquidation_price,
+                    "position_usd": _coerce_float(item.get("positionUsd")) or 0.0,
+                    "leverage": _coerce_float(item.get("leverage")) or 0.0,
+                    "size": _coerce_float(item.get("size")) or 0.0,
+                    "entry_price": _coerce_float(item.get("entryPrice")),
+                    "mark_price": _coerce_float(item.get("price")),
+                    "position_type": item.get("positionType"),
+                    "direction": (
+                        "long"
+                        if (_coerce_float(item.get("size")) or 0.0) > 0
+                        else "short"
+                    ),
+                    "update_time": item.get("updateTime"),
+                }
+            )
+
+        return HeatmapSnapshot(
+            provider="coinglass-hyperliquid-liqmap",
+            symbol=symbol,
+            captured_at=latest_timestamp or datetime.now(tz=UTC),
+            clusters_above=self._levels_to_clusters(above_levels, ClusterSide.ABOVE),
+            clusters_below=self._levels_to_clusters(below_levels, ClusterSide.BELOW),
+            metadata={
+                "source": "capi-hyperliquid-topPosition-liqMap",
+                "price": current_price,
+                "positions_count": len(positions),
+                "positions": detailed_positions,
+                "levels_above": self._levels_to_metadata(above_levels),
+                "levels_below": self._levels_to_metadata(below_levels),
+            },
+        )
+
+    def _request_headers(self) -> dict[str, str]:
+        headers = {
+            "accept": "application/json",
+            "accept-language": "en-US,en;q=0.7",
+            "cache-ts-v2": str(int(time() * 1000)),
+            "encryption": "true",
+            "language": self.language,
+            "origin": "https://www.coinglass.com",
+            "referer": "https://www.coinglass.com/",
+            "sec-ch-ua": '"Chromium";v="145", "Not:A-Brand";v="99"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"macOS"',
+            "sec-fetch-dest": "empty",
+            "sec-fetch-mode": "cors",
+            "sec-fetch-site": "same-site",
+            "user-agent": self.user_agent,
+        }
+        if self.obe:
+            headers["obe"] = self.obe
+        return headers
+
+    def _decode_encrypted_response(
+        self,
+        payload: object,
+        headers: Mapping[str, str],
+    ) -> dict[str, object]:
+        if not isinstance(payload, dict):
+            raise ValueError("Unexpected liqMap response envelope")
+        encrypted_data = payload.get("data")
+        if not isinstance(encrypted_data, str):
+            raise ValueError("liqMap response missing encrypted data")
+        time_header = headers.get("time")
+        user_header = headers.get("user")
+        if not time_header or not user_header:
+            raise ValueError("liqMap response missing decryption headers")
+        seed_key = base64.b64encode(time_header.encode("utf-8")).decode("ascii")[:16]
+        user_key_gzip = self._aes_ecb_decrypt_base64(user_header, seed_key)
+        data_key = gzip.decompress(user_key_gzip).decode("utf-8")
+        decoded_gzip = self._aes_ecb_decrypt_base64(encrypted_data, data_key)
+        decoded = gzip.decompress(decoded_gzip).decode("utf-8")
+        parsed = json.loads(decoded)
+        if not isinstance(parsed, dict):
+            raise ValueError("Decoded liqMap payload is not a JSON object")
+        return parsed
+
+    def _aes_ecb_decrypt_base64(self, cipher_text_base64: str, key: str) -> bytes:
+        cipher = AES.new(key.encode("utf-8"), AES.MODE_ECB)
+        encrypted = base64.b64decode(cipher_text_base64)
+        return unpad(cipher.decrypt(encrypted), AES.block_size)
+
+    def _levels_to_clusters(
+        self,
+        levels: dict[float, dict[str, float]],
+        side: ClusterSide,
+    ) -> list[Cluster]:
+        clusters = [
+            Cluster(
+                side=side,
+                price=price,
+                size=data["size"],
+                shape=self._shape_from_orders(int(data["orders"])),
+            )
+            for price, data in levels.items()
+        ]
+        return sorted(clusters, key=lambda cluster: cluster.size, reverse=True)[:3]
+
+    def _levels_to_metadata(
+        self,
+        levels: dict[float, dict[str, float]],
+    ) -> list[dict[str, float]]:
+        return [
+            {
+                "price": price,
+                "size": data["size"],
+                "orders": data["orders"],
+            }
+            for price, data in sorted(levels.items(), key=lambda item: item[0])
+        ]
+
+    def _shape_from_orders(self, orders: int) -> ClusterShape:
+        if orders >= 20:
+            return ClusterShape.SINGLE_WALL
+        if orders >= 5:
+            return ClusterShape.STAIRCASE
+        return ClusterShape.DIFFUSE
+
+    def _write_raw_payload(
+        self,
+        symbol: str,
+        payload: object,
+        *,
+        prefix: str,
+    ) -> str:
+        raw_dir = self.cache_dir / "raw"
+        raw_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(tz=UTC).strftime("%Y%m%dT%H%M%SZ")
+        path = raw_dir / f"{prefix}-{symbol.lower()}-{stamp}.json"
+        path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
+        _prune_cache_dir(raw_dir)
+        return str(path)
 
 
 class CoinGlassHeatmapClient:
@@ -413,3 +641,23 @@ def _prune_cache_dir(directory: Path, *, keep_latest: int = MAX_HEATMAP_CACHE_FI
     )
     for stale_path in files[keep_latest:]:
         stale_path.unlink(missing_ok=True)
+
+
+def _coerce_float(value: object) -> float | None:
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str) and value:
+        return float(value)
+    return None
+
+
+def _extract_timestamp_value(value: object) -> datetime | None:
+    if isinstance(value, (int, float)):
+        seconds = value / 1000 if value > 10_000_000_000 else value
+        return datetime.fromtimestamp(seconds, tz=UTC)
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    return None

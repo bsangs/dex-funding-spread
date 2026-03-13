@@ -53,6 +53,8 @@ def test_router_input_prefers_local_heatmap_image(tmp_path: Path) -> None:
     assert '"entry_candidates"' in structured_context
     assert '"candles_1h"' in structured_context
     assert '"candles_4h"' in structured_context
+    assert '"heatmap_positions"' in structured_context
+    assert '"heatmap_levels_above_detailed"' in structured_context
 
 
 def test_router_input_falls_back_to_remote_heatmap_url() -> None:
