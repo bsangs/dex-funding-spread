@@ -609,7 +609,7 @@ def test_execute_plan_places_protection_after_filled_cluster_fade_entry() -> Non
     assert sum(1 for receipt in receipts if receipt.action == "place") >= 4
 
 
-def test_exchange_executor_schedule_dead_man_switch_is_flat_only() -> None:
+def test_exchange_executor_does_not_arm_dead_man_switch_for_resting_entries() -> None:
     exchange = FakeExchange()
     validator = PreSubmitValidator(
         {"BTC": AssetMetadata(symbol="BTC", asset_index=0, size_decimals=3)}
@@ -635,7 +635,7 @@ def test_exchange_executor_schedule_dead_man_switch_is_flat_only() -> None:
         now=datetime(2026, 3, 12, 12, 0, tzinfo=UTC),
     )
 
-    assert exchange.schedule_cancel_calls[0] is not None
+    assert exchange.schedule_cancel_calls[0] is None
     assert exchange.schedule_cancel_calls[1] is None
 
 

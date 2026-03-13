@@ -100,10 +100,10 @@ class HyperliquidExchangeExecutor:
         position_open: bool,
         now: datetime,
     ) -> Any:
-        if position_open or not has_resting_entry:
-            return self.exchange.schedule_cancel(None)
-        deadline = int((now + timedelta(seconds=30)).timestamp() * 1000)
-        return self.exchange.schedule_cancel(deadline)
+        # Resting entries are meant to stay on the book until they fill or a
+        # later reconciliation pass explicitly replaces or cancels them.
+        _ = has_resting_entry, position_open, now
+        return self.exchange.schedule_cancel(None)
 
     def apply_leverage_preflight(
         self,

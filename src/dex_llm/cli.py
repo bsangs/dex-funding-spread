@@ -7,6 +7,7 @@ from pathlib import Path
 import typer
 from rich.console import Console
 
+from dex_llm.bot import BotRuntime
 from dex_llm.collector.storage import JsonlFrameStore
 from dex_llm.config import AppSettings
 from dex_llm.executor import (
@@ -699,6 +700,84 @@ def execute_live(
         console.print_json(json.dumps(payload))
     finally:
         rest_gateway.close()
+
+
+@app.command("run-bot")
+def run_bot(
+    symbol: str = DEFAULT_SYMBOL_ARGUMENT,
+    heatmap_param: list[str] | None = HEATMAP_PARAM_OPTION,
+    allow_synthetic: bool = ALLOW_SYNTHETIC_OPTION,
+    user_address: str | None = USER_ADDRESS_OPTION,
+    live: bool = typer.Option(
+        False,
+        "--live",
+        help="Actually submit live orders instead of paper output.",
+    ),
+    strategy_interval_s: int | None = typer.Option(
+        None,
+        help="How often to refresh the strategy/heatmap decision loop.",
+    ),
+    sync_interval_s: int | None = typer.Option(
+        None,
+        help="How often to sync orders, fills, and protections.",
+    ),
+    max_cycles: int | None = typer.Option(
+        None,
+        help="Optional test hook to stop after N sync cycles.",
+        hidden=True,
+    ),
+) -> None:
+    settings = AppSettings()
+    resolved_user = _resolved_trading_user(settings, user_address)
+    if resolved_user is None:
+        raise typer.BadParameter("trading user address is required for run-bot")
+    rest_gateway = HyperliquidRestGateway(
+        base_url=settings.hyperliquid_base_url,
+        timeout_s=settings.request_timeout_s,
+    )
+    ws_client = HyperliquidWsStateClient(
+        base_url=settings.hyperliquid_base_url,
+        timeout_s=settings.request_timeout_s,
+        user_address=resolved_user,
+    )
+    heatmap_client = _build_heatmap_client(settings)
+    builder = LiveFrameBuilder(
+        rest_gateway,
+        heatmap_client,
+        kill_switch_policy=_build_kill_switch_policy(settings),
+    )
+    executor = _build_executor(
+        settings,
+        symbol=symbol,
+        rest_gateway=rest_gateway,
+        user_address=resolved_user,
+    )
+    executor.verify_signer()
+    runtime = BotRuntime(
+        symbol=symbol,
+        user_address=resolved_user,
+        heatmap_params=_parse_key_value_params(heatmap_param),
+        allow_synthetic=allow_synthetic,
+        router=_build_router(settings),
+        builder=builder,
+        rest_gateway=rest_gateway,
+        ws_client=ws_client,
+        executor=executor,
+        risk_policy=RiskPolicy(
+            risk_per_trade_pct=settings.risk_per_trade_pct,
+            max_consecutive_losses=settings.kill_switch_max_consecutive_losses,
+            cluster_fade_long_weight=settings.cluster_fade_long_weight,
+            cluster_fade_short_weight=settings.cluster_fade_short_weight,
+        ),
+        max_leverage=settings.max_leverage,
+        strategy_interval_s=strategy_interval_s or settings.bot_strategy_interval_s,
+        sync_interval_s=sync_interval_s or settings.bot_sync_interval_s,
+        live=live,
+        execution_mode_live=settings.execution_mode == ExecutionMode.LIVE,
+        dex=settings.hyperliquid_dex,
+        console=console,
+    )
+    runtime.run(max_cycles=max_cycles)
 
 
 if __name__ == "__main__":
