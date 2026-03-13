@@ -227,7 +227,6 @@ class LiveFrameBuilder:
                 component_timestamps["private_state"] = clearinghouse_state.time.isoformat()
 
         kill_switch = self.kill_switch_policy.evaluate(
-            frame_timestamp=frame_timestamp,
             position=position,
             info_latency_ms=public_latency_ms,
             private_state_latency_ms=private_latency_ms,
@@ -349,7 +348,6 @@ class LiveFrameBuilder:
             metadata["heatmap_metadata"] = dict(heatmap_snapshot.metadata)
 
         kill_switch = self.kill_switch_policy.evaluate(
-            frame_timestamp=frame_timestamp,
             position=position,
             info_latency_ms=public_age_ms,
             private_state_latency_ms=private_age_ms,

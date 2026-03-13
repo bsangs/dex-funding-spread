@@ -202,7 +202,6 @@ class KillSwitchStatus(BaseModel):
     reasons: list[str] = Field(default_factory=list)
     observed_open_orders: int = 0
     entries_blocked_reduce_only: bool = False
-    data_age_ms: float | None = None
     info_latency_ms: float | None = None
     private_state_latency_ms: float | None = None
 

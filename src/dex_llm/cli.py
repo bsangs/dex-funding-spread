@@ -79,7 +79,6 @@ def _build_kill_switch_policy(settings: AppSettings) -> KillSwitchPolicy:
     return KillSwitchPolicy(
         max_info_latency_ms=settings.kill_switch_max_info_latency_ms,
         max_private_latency_ms=settings.kill_switch_max_private_latency_ms,
-        max_data_age_ms=settings.kill_switch_max_data_age_ms,
     )
 
 

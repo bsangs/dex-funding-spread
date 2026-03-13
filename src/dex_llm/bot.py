@@ -584,7 +584,6 @@ class BotRuntime:
         heatmap_provider = strategy_state.frame.metadata.get("heatmap_provider", "unknown")
         heatmap_error = strategy_state.frame.metadata.get("heatmap_error")
         return self.builder.kill_switch_policy.evaluate(
-            frame_timestamp=snapshot.order_book.captured_at,
             position=position,
             info_latency_ms=info_latency_ms,
             private_state_latency_ms=private_latency_ms,
