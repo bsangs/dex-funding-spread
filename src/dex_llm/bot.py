@@ -8,7 +8,9 @@ from typing import Any
 
 from rich.console import Console
 
+from dex_llm.analytics.report import summarize_outcomes
 from dex_llm.executor import HyperliquidExchangeExecutor
+from dex_llm.executor.paper import PaperBroker
 from dex_llm.features.extractor import FeatureExtractor
 from dex_llm.integrations.hyperliquid_live import HyperliquidRestGateway, HyperliquidWsStateClient
 from dex_llm.live_frame import LiveFrameBuilder, _channel_age_ms
@@ -55,7 +57,7 @@ class BotRuntime:
         risk_policy: RiskPolicy,
         max_leverage: float,
         strategy_interval_s: int = 1_800,
-        sync_interval_s: int = 30,
+        sync_interval_s: int = 120,
         live: bool = False,
         execution_mode_live: bool = False,
         dex: str = "",
@@ -77,6 +79,7 @@ class BotRuntime:
         self.live = live or execution_mode_live
         self.dex = dex
         self.console = console or Console()
+        self.paper_broker = PaperBroker()
         self._strategy_state: StrategyState | None = None
         self._previous_position_side = TradeSide.FLAT
 
@@ -89,10 +92,13 @@ class BotRuntime:
                 cycle += 1
                 cycle_started = datetime.now(tz=UTC)
                 snapshot, fills, meta = self._capture_snapshot()
-                position = self._position_from_snapshot(snapshot, fills)
+                pre_strategy_receipts: list[dict[str, object]] = []
+                if not self.live:
+                    pre_strategy_receipts = self._paper_mark_market(snapshot, cycle_started)
+                position = self._position_state(snapshot, fills)
                 refresh_strategy = self._should_refresh_strategy(cycle_started, position)
                 if refresh_strategy:
-                    self._strategy_state = self._compute_strategy_state(snapshot, fills)
+                    self._strategy_state = self._compute_strategy_state(snapshot, fills, position)
 
                 if self._strategy_state is None:
                     raise RuntimeError("strategy state was not initialized")
@@ -122,6 +128,7 @@ class BotRuntime:
                     plan=effective_plan,
                     risk=risk,
                 )
+                receipts = pre_strategy_receipts + receipts
                 dms = None
                 if self.live:
                     dms = self.executor.schedule_dead_man_switch(
@@ -142,6 +149,8 @@ class BotRuntime:
                     meta=meta,
                 )
                 self._previous_position_side = position.side
+                if max_cycles is not None and cycle >= max_cycles:
+                    break
                 sleep_for = self.sync_interval_s - (
                     datetime.now(tz=UTC) - cycle_started
                 ).total_seconds()
@@ -213,6 +222,7 @@ class BotRuntime:
         self,
         snapshot: LiveStateSnapshot,
         fills: list[object] | None,
+        position: PositionState,
     ) -> StrategyState:
         frame = self.builder.build_from_snapshot(
             snapshot,
@@ -220,10 +230,11 @@ class BotRuntime:
             allow_synthetic=self.allow_synthetic,
             fills=fills,
         )
+        frame = frame.model_copy(update={"position": position})
         features = FeatureExtractor().extract(frame)
         plan = self.router.route(frame, features)
         account = self._account_from_snapshot(snapshot)
-        risk = self.risk_policy.assess(plan, account, frame.position, frame.kill_switch)
+        risk = self.risk_policy.assess(plan, account, position, frame.kill_switch)
         return StrategyState(
             frame=frame,
             features=features,
@@ -289,6 +300,15 @@ class BotRuntime:
         oracle_price = snapshot.active_asset_ctx.oracle_price if snapshot.active_asset_ctx else None
         frame_timestamp = snapshot.captured_at or datetime.now(tz=UTC)
 
+        if not self.live:
+            receipts = self.paper_broker.sync_plan(
+                symbol=self.symbol,
+                plan=plan,
+                risk=risk,
+                frame_timestamp=frame_timestamp,
+            )
+            return [receipt.model_dump(mode="json") for receipt in receipts], None
+
         if plan.playbook.value == "no_trade" and position.side == TradeSide.FLAT:
             receipts = self.executor.reconcile_orders(
                 symbol=self.symbol,
@@ -333,9 +353,6 @@ class BotRuntime:
                 )
                 return [receipt.model_dump(mode="json") for receipt in receipts], leverage_preflight
 
-        if not self.live:
-            return [], leverage_preflight
-
         receipts = self.executor.execute_plan(
             plan=plan,
             risk=risk,
@@ -348,11 +365,13 @@ class BotRuntime:
         )
         return [receipt.model_dump(mode="json") for receipt in receipts], leverage_preflight
 
-    def _position_from_snapshot(
+    def _position_state(
         self,
         snapshot: LiveStateSnapshot,
         fills: list[object] | None,
     ) -> PositionState:
+        if not self.live:
+            return self.paper_broker.paper_position_state(symbol=snapshot.symbol)
         return self.builder._build_position_state(
             symbol=snapshot.symbol,
             clearinghouse_state=snapshot.clearinghouse_state,
@@ -395,11 +414,17 @@ class BotRuntime:
         )
         if available_margin <= 0:
             available_margin = equity
-        return AccountState(
+        base_account = AccountState(
             equity=equity,
             available_margin=available_margin,
             max_leverage=self.max_leverage,
         )
+        if not self.live:
+            return self.paper_broker.account_state(
+                base_account,
+                mark_price=snapshot.order_book.mid_price,
+            )
+        return base_account
 
     def _kill_switch_from_snapshot(
         self,
@@ -458,7 +483,28 @@ class BotRuntime:
                 "fills_safe_complete": meta.get("fills_safe_complete"),
             },
         }
+        if not self.live:
+            payload["paper_state"] = self.paper_broker.state_payload(
+                mark_price=self._strategy_state.frame.current_price
+                if self._strategy_state is not None
+                else 0.0
+            )
+            payload["paper_summary"] = summarize_outcomes(self.paper_broker.outcomes)
         self.console.print_json(json.dumps(payload))
+
+    def _paper_mark_market(
+        self,
+        snapshot: LiveStateSnapshot,
+        now: datetime,
+    ) -> list[dict[str, object]]:
+        receipts = self.paper_broker.mark_market(
+            symbol=self.symbol,
+            price_candle=snapshot.candles_5m[-1] if snapshot.candles_5m else None,
+            best_bid=snapshot.order_book.best_bid,
+            best_ask=snapshot.order_book.best_ask,
+            now=now,
+        )
+        return [receipt.model_dump(mode="json") for receipt in receipts]
 
     @staticmethod
     def _apply_rest_private_bootstrap(

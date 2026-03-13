@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from dex_llm.models import ExecutionMode, MarginMode
@@ -40,7 +41,7 @@ class AppSettings(BaseSettings):
     request_timeout_s: float = 10.0
     coinglass_scrape_timeout_s: float = 20.0
     bot_strategy_interval_s: int = 1_800
-    bot_sync_interval_s: int = 30
+    bot_sync_interval_s: int = 120
     kill_switch_max_info_latency_ms: float = 1_500.0
     kill_switch_max_private_latency_ms: float = 1_500.0
     kill_switch_max_data_age_ms: float = 15_000.0
@@ -58,6 +59,22 @@ class AppSettings(BaseSettings):
     max_stop_to_liq_fraction: float = 0.8
     openai_image_detail: str = "auto"
     clock_drift_limit_ms: float = 500.0
+
+    @field_validator(
+        "openai_api_key",
+        "trading_user_address",
+        "hyperliquid_user_address",
+        "signer_agent_address",
+        "signer_private_key",
+        "hyperliquid_vault_address",
+        "coinglass_api_key",
+        mode="before",
+    )
+    @classmethod
+    def empty_string_to_none(cls, value: str | None) -> str | None:
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
     model_config = SettingsConfigDict(
         env_prefix="DEX_LLM_",

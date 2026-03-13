@@ -103,7 +103,7 @@ class HyperliquidExchangeExecutor:
         # Resting entries are meant to stay on the book until they fill or a
         # later reconciliation pass explicitly replaces or cancels them.
         _ = has_resting_entry, position_open, now
-        return self.exchange.schedule_cancel(None)
+        return {"status": "skipped", "response": {"status": "disabled"}}
 
     def apply_leverage_preflight(
         self,
@@ -127,15 +127,21 @@ class HyperliquidExchangeExecutor:
         )
         if not result.valid:
             return result
-        if current_leverage is None or int(current_leverage) != target_leverage:
-            self.exchange.update_leverage(
-                leverage=target_leverage,
-                name=symbol,
-                is_cross=margin_mode == MarginMode.CROSS,
+        try:
+            if current_leverage is None or int(current_leverage) != target_leverage:
+                self.exchange.update_leverage(
+                    leverage=target_leverage,
+                    name=symbol,
+                    is_cross=margin_mode == MarginMode.CROSS,
+                )
+            if margin_mode == MarginMode.ISOLATED:
+                required_margin = (recommended_notional / target_leverage) * 1.1
+                self.exchange.update_isolated_margin(amount=required_margin, name=symbol)
+        except Exception as exc:
+            return ValidationResult(
+                valid=False,
+                reason=f"leverage preflight update failed: {exc}",
             )
-        if margin_mode == MarginMode.ISOLATED:
-            required_margin = (recommended_notional / target_leverage) * 1.1
-            self.exchange.update_isolated_margin(amount=required_margin, name=symbol)
         return result
 
     def build_orders_from_plan(

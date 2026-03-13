@@ -150,6 +150,11 @@ class FilledEntryExchange(FakeExchange):
         return response
 
 
+class BrokenLeverageExchange(FakeExchange):
+    def update_leverage(self, leverage: int, name: str, is_cross: bool = True) -> dict[str, object]:
+        raise RuntimeError("exchange rejected leverage update")
+
+
 def test_build_deterministic_cloid_is_revisioned() -> None:
     frame_ts = datetime(2026, 3, 12, 12, 0, tzinfo=UTC)
 
@@ -269,6 +274,35 @@ def test_rate_limit_budgeter_soft_degrades_on_pressure() -> None:
     assert status.degrade is True
     assert status.suspend_llm is True
     assert status.reduce_only_only is True
+
+
+def test_apply_leverage_preflight_fails_closed_when_exchange_rejects_update() -> None:
+    exchange = BrokenLeverageExchange()
+    validator = PreSubmitValidator(
+        {"ETH": AssetMetadata(symbol="ETH", asset_index=1, size_decimals=4, max_leverage=25.0)}
+    )
+    executor = HyperliquidExchangeExecutor(
+        base_url="https://api.hyperliquid.xyz",
+        signer_private_key="0x59c6995e998f97a5a0044966f094538b2924c92f6e7e0c0c7f3d4e3cbb0dbe4a",
+        signer_agent_address="0x0000000000000000000000000000000000000000",
+        trading_user_address="0x1111111111111111111111111111111111111111",
+        validator=validator,
+        nonce_manager=NonceManager("0xsigner", now_ms=lambda: 1_000),
+        exchange_client=exchange,
+    )
+
+    result = executor.apply_leverage_preflight(
+        symbol="ETH",
+        target_leverage=10,
+        margin_mode=MarginMode.ISOLATED,
+        current_leverage=None,
+        max_leverage=25.0,
+        recommended_notional=700.0,
+        available_margin=200.0,
+    )
+
+    assert result.valid is False
+    assert "leverage preflight update failed" in result.reason
 
 
 def test_ambiguous_state_resolver_prefers_order_status() -> None:
@@ -609,7 +643,7 @@ def test_execute_plan_places_protection_after_filled_cluster_fade_entry() -> Non
     assert sum(1 for receipt in receipts if receipt.action == "place") >= 4
 
 
-def test_exchange_executor_does_not_arm_dead_man_switch_for_resting_entries() -> None:
+def test_exchange_executor_skips_dead_man_switch_for_resting_entries() -> None:
     exchange = FakeExchange()
     validator = PreSubmitValidator(
         {"BTC": AssetMetadata(symbol="BTC", asset_index=0, size_decimals=3)}
@@ -624,19 +658,20 @@ def test_exchange_executor_does_not_arm_dead_man_switch_for_resting_entries() ->
         exchange_client=exchange,
     )
 
-    executor.schedule_dead_man_switch(
+    first = executor.schedule_dead_man_switch(
         has_resting_entry=True,
         position_open=False,
         now=datetime(2026, 3, 12, 12, 0, tzinfo=UTC),
     )
-    executor.schedule_dead_man_switch(
+    second = executor.schedule_dead_man_switch(
         has_resting_entry=True,
         position_open=True,
         now=datetime(2026, 3, 12, 12, 0, tzinfo=UTC),
     )
 
-    assert exchange.schedule_cancel_calls[0] is None
-    assert exchange.schedule_cancel_calls[1] is None
+    assert exchange.schedule_cancel_calls == []
+    assert first["status"] == "skipped"
+    assert second["status"] == "skipped"
 
 
 def test_build_executor_uses_requested_symbol() -> None:
