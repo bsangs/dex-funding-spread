@@ -31,11 +31,14 @@ class AppSettings(BaseSettings):
     coinglass_api_key: str | None = None
     coinglass_base_url: str = "https://open-api-v4.coinglass.com"
     coinglass_heatmap_path: str = "/api/futures/liquidation/aggregated-heatmap/model1"
+    coinglass_web_url: str = "https://www.coinglass.com/ko/liquidations"
+    coinglass_use_playwright_fallback: bool = True
     prompt_path: Path = Path("prompts/playbook_router.md")
     raw_data_dir: Path = Path("data/raw")
     replay_dir: Path = Path("data/replays")
     heatmap_cache_dir: Path = Path("data/heatmaps")
     request_timeout_s: float = 10.0
+    coinglass_scrape_timeout_s: float = 20.0
     kill_switch_max_info_latency_ms: float = 1_500.0
     kill_switch_max_private_latency_ms: float = 1_500.0
     kill_switch_max_data_age_ms: float = 15_000.0

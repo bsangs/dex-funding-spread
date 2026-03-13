@@ -247,6 +247,19 @@ class HyperliquidWsStateClient:
             time.sleep(0.05)
         raise TimeoutError("Timed out waiting for Hyperliquid websocket snapshots")
 
+    def wait_until_public_ready(self, *, timeout_s: float = 5.0) -> None:
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            if self._is_public_ready():
+                return
+            time.sleep(0.05)
+        raise TimeoutError("Timed out waiting for Hyperliquid public websocket snapshots")
+
+    def private_state_ready(self) -> bool:
+        if self.user_address is None:
+            return True
+        return self._clearinghouse_state is not None
+
     def send_heartbeat_if_idle(self, *, idle_s: float = 30.0) -> bool:
         manager = getattr(self.info, "ws_manager", None)
         if manager is None:
@@ -308,18 +321,21 @@ class HyperliquidWsStateClient:
             self._channel_snapshot_flags[channel] = is_snapshot
 
     def _is_ready(self) -> bool:
-        public_ready = (
+        public_ready = self._is_public_ready()
+        if not public_ready:
+            return False
+        if self.user_address is None:
+            return True
+        return self._clearinghouse_state is not None
+
+    def _is_public_ready(self) -> bool:
+        return (
             self._order_book is not None
             and bool(self._candles_5m)
             and bool(self._candles_15m)
             and self._bbo is not None
             and self._active_asset_ctx is not None
         )
-        if not public_ready:
-            return False
-        if self.user_address is None:
-            return True
-        return self._clearinghouse_state is not None
 
     def _merge_candles(self, data: object, *, is_snapshot: bool) -> None:
         if isinstance(data, list):

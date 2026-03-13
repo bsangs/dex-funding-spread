@@ -18,14 +18,18 @@ from dex_llm.executor import (
     RateLimitBudgeter,
 )
 from dex_llm.features.extractor import FeatureExtractor
-from dex_llm.integrations.coinglass import CoinGlassHeatmapClient
+from dex_llm.integrations.coinglass import (
+    CoinGlassFallbackHeatmapClient,
+    CoinGlassHeatmapClient,
+    CoinGlassLiquidationsPageClient,
+)
 from dex_llm.integrations.hyperliquid import HyperliquidInfoClient
 from dex_llm.integrations.hyperliquid_live import HyperliquidRestGateway, HyperliquidWsStateClient
 from dex_llm.live_frame import LiveFrameBuilder
 from dex_llm.llm.openai_router import OpenAIRouter
 from dex_llm.llm.prompting import load_prompt_template, render_router_prompt
 from dex_llm.llm.router import HeuristicPlaybookRouter, RouterProtocol
-from dex_llm.models import AccountState, ExecutionMode, MarketFrame, TradeSide
+from dex_llm.models import AccountState, ExecutionMode, LiveStateSnapshot, MarketFrame, TradeSide
 from dex_llm.replay.session import ReplaySession
 from dex_llm.risk.kill_switch import KillSwitchPolicy
 from dex_llm.risk.policy import RiskPolicy
@@ -81,16 +85,26 @@ def _build_kill_switch_policy(settings: AppSettings) -> KillSwitchPolicy:
     )
 
 
-def _build_heatmap_client(settings: AppSettings) -> CoinGlassHeatmapClient | None:
-    if not settings.coinglass_api_key:
+def _build_heatmap_client(settings: AppSettings) -> object | None:
+    primary = None
+    if settings.coinglass_api_key:
+        primary = CoinGlassHeatmapClient(
+            api_key=settings.coinglass_api_key,
+            base_url=settings.coinglass_base_url,
+            heatmap_path=settings.coinglass_heatmap_path,
+            timeout_s=settings.request_timeout_s,
+            cache_dir=settings.heatmap_cache_dir,
+        )
+    fallback = None
+    if settings.coinglass_use_playwright_fallback:
+        fallback = CoinGlassLiquidationsPageClient(
+            page_url=settings.coinglass_web_url,
+            timeout_s=settings.coinglass_scrape_timeout_s,
+            cache_dir=settings.heatmap_cache_dir,
+        )
+    if primary is None and fallback is None:
         return None
-    return CoinGlassHeatmapClient(
-        api_key=settings.coinglass_api_key,
-        base_url=settings.coinglass_base_url,
-        heatmap_path=settings.coinglass_heatmap_path,
-        timeout_s=settings.request_timeout_s,
-        cache_dir=settings.heatmap_cache_dir,
-    )
+    return CoinGlassFallbackHeatmapClient(primary, fallback)
 
 
 def _build_router(settings: AppSettings) -> RouterProtocol:
@@ -200,10 +214,12 @@ def _build_ws_frame(
     )
     try:
         ws_client.connect(symbol, user_address=user_address)
-        ws_client.wait_until_ready(timeout_s=settings.request_timeout_s)
-        snapshot = ws_client.snapshot()
+        ws_client.wait_until_public_ready(timeout_s=settings.request_timeout_s)
+        snapshot = ws_client.snapshot().model_copy(update={"captured_at": datetime.now(tz=UTC)})
         fills = None
         fills_safe_complete = True
+        private_source = "ws" if ws_client.private_state_ready() else "pending"
+        private_bootstrap_error: str | None = None
         if user_address:
             day_start = snapshot.order_book.captured_at.astimezone(UTC).replace(
                 hour=0,
@@ -217,6 +233,28 @@ def _build_ws_frame(
                 end_time=int(snapshot.order_book.captured_at.timestamp() * 1000),
             )
             fills = paginated_fills
+            if not ws_client.private_state_ready():
+                try:
+                    clearinghouse_state = rest_gateway.fetch_clearinghouse_state(
+                        user=user_address,
+                        dex=settings.hyperliquid_dex,
+                    )
+                    open_orders = rest_gateway.fetch_open_orders(
+                        user=user_address,
+                        dex=settings.hyperliquid_dex,
+                    )
+                    snapshot = _apply_rest_private_bootstrap(
+                        snapshot,
+                        clearinghouse_state=clearinghouse_state,
+                        open_orders=open_orders,
+                        fills=fills,
+                        bootstrapped_at=datetime.now(tz=UTC),
+                    )
+                    private_source = "rest_bootstrap"
+                except Exception as exc:
+                    private_bootstrap_error = str(exc)
+            elif fills is not None:
+                snapshot = snapshot.model_copy(update={"recent_fills": fills})
         frame = builder.build_from_snapshot(
             snapshot,
             heatmap_params=heatmap_params,
@@ -226,12 +264,21 @@ def _build_ws_frame(
         meta = {
             "snapshot": snapshot.model_dump(mode="json"),
             "fills_safe_complete": fills_safe_complete,
+            "private_state_source": private_source,
+            "private_ws_ready": ws_client.private_state_ready(),
         }
+        if private_bootstrap_error is not None:
+            meta["private_bootstrap_error"] = private_bootstrap_error
         if not fills_safe_complete:
             frame.kill_switch.allow_new_trades = False
             frame.kill_switch.reduce_only = True
             frame.kill_switch.reasons.append(
                 "fill backfill incomplete; safe-fail kill switch active"
+            )
+        if user_address and snapshot.clearinghouse_state is None:
+            frame.kill_switch.allow_new_trades = False
+            frame.kill_switch.reasons.append(
+                "private account state unavailable after websocket and REST bootstrap"
             )
         return frame, meta
     finally:
@@ -239,6 +286,29 @@ def _build_ws_frame(
         rest_gateway.close()
         if heatmap_client is not None:
             heatmap_client.close()
+
+
+def _apply_rest_private_bootstrap(
+    snapshot: LiveStateSnapshot,
+    *,
+    clearinghouse_state: object,
+    open_orders: list[object],
+    fills: list[object] | None,
+    bootstrapped_at: datetime,
+) -> LiveStateSnapshot:
+    channel_timestamps = dict(snapshot.channel_timestamps)
+    channel_timestamps["restPrivateBootstrap"] = bootstrapped_at
+    channel_snapshot_flags = dict(snapshot.channel_snapshot_flags)
+    channel_snapshot_flags["restPrivateBootstrap"] = False
+    return snapshot.model_copy(
+        update={
+            "clearinghouse_state": clearinghouse_state,
+            "open_orders": open_orders,
+            "recent_fills": fills if fills is not None else snapshot.recent_fills,
+            "channel_timestamps": channel_timestamps,
+            "channel_snapshot_flags": channel_snapshot_flags,
+        }
+    )
 
 
 def _build_executor(
@@ -412,16 +482,9 @@ def coinglass_preview(
     heatmap_param: list[str] | None = HEATMAP_PARAM_OPTION,
 ) -> None:
     settings = AppSettings()
-    if not settings.coinglass_api_key:
-        raise typer.BadParameter("DEX_LLM_COINGLASS_API_KEY is required for CoinGlass preview")
-
-    client = CoinGlassHeatmapClient(
-        api_key=settings.coinglass_api_key,
-        base_url=settings.coinglass_base_url,
-        heatmap_path=settings.coinglass_heatmap_path,
-        timeout_s=settings.request_timeout_s,
-        cache_dir=settings.heatmap_cache_dir,
-    )
+    client = _build_heatmap_client(settings)
+    if client is None:
+        raise typer.BadParameter("CoinGlass provider is not configured")
     try:
         snapshot = client.fetch_heatmap(symbol, extra_params=_parse_key_value_params(heatmap_param))
         console.print_json(json.dumps(snapshot.model_dump(mode="json")))

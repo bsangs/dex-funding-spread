@@ -369,6 +369,60 @@ def test_live_frame_builder_preserves_heatmap_image_metadata() -> None:
     assert frame.heatmap_image_path == "data/heatmaps/images/coinglass-eth.png"
 
 
+def test_live_frame_builder_merges_synthetic_clusters_into_web_scrape_snapshot() -> None:
+    class EmptyClusterHeatmapClient(FakeHeatmapClient):
+        def fetch_heatmap(
+            self,
+            symbol: str,
+            extra_params: Mapping[str, str] | None = None,
+        ) -> HeatmapSnapshot:
+            return HeatmapSnapshot(
+                provider="coinglass-web-scrape",
+                symbol=symbol,
+                captured_at=self.captured_at,
+                clusters_above=[],
+                clusters_below=[],
+                heatmap_image_path="data/heatmaps/images/coinglass-web-eth.png",
+                metadata={"symbol_visible": True},
+            )
+
+    builder = LiveFrameBuilder(FakeHyperliquidClient(), EmptyClusterHeatmapClient())
+
+    frame = builder.build("BTC", allow_synthetic=True)
+
+    assert frame.map_quality == MapQuality.MIXED
+    assert frame.heatmap_image_path == "data/heatmaps/images/coinglass-web-eth.png"
+    assert frame.clusters_above
+    assert frame.clusters_below
+    assert frame.metadata["heatmap_provider"] == "coinglass-web-scrape+synthetic"
+    assert frame.metadata["heatmap_metadata"]["cluster_source"] == "synthetic-orderbook"
+
+
+def test_live_frame_builder_auto_merges_web_scrape_without_allow_synthetic() -> None:
+    class EmptyClusterHeatmapClient(FakeHeatmapClient):
+        def fetch_heatmap(
+            self,
+            symbol: str,
+            extra_params: Mapping[str, str] | None = None,
+        ) -> HeatmapSnapshot:
+            return HeatmapSnapshot(
+                provider="coinglass-web-scrape",
+                symbol=symbol,
+                captured_at=self.captured_at,
+                clusters_above=[],
+                clusters_below=[],
+                heatmap_image_path="data/heatmaps/images/coinglass-web-eth.png",
+            )
+
+    builder = LiveFrameBuilder(FakeHyperliquidClient(), EmptyClusterHeatmapClient())
+
+    frame = builder.build("BTC", allow_synthetic=False)
+
+    assert frame.map_quality == MapQuality.MIXED
+    assert frame.clusters_above
+    assert frame.clusters_below
+
+
 def test_live_frame_builder_uses_webdata3_and_userevents_for_private_freshness() -> None:
     now = datetime.now(tz=UTC)
     snapshot = LiveStateSnapshot(
@@ -419,3 +473,79 @@ def test_live_frame_builder_uses_webdata3_and_userevents_for_private_freshness()
     frame = builder.build_from_snapshot(snapshot, allow_synthetic=False)
 
     assert frame.kill_switch.allow_new_trades is True
+
+
+def test_live_frame_builder_accepts_rest_private_bootstrap_when_ws_private_missing() -> None:
+    now = datetime.now(tz=UTC)
+    snapshot = LiveStateSnapshot(
+        symbol="BTC",
+        order_book=OrderBookSnapshot(
+            symbol="BTC",
+            captured_at=now,
+            best_bid=70100.0,
+            best_ask=70110.0,
+            mid_price=70105.0,
+            bids=[PriceLevel(price=70100.0, size=8.0, orders=12)],
+            asks=[PriceLevel(price=70110.0, size=9.0, orders=14)],
+        ),
+        candles_5m=FakeHyperliquidClient().candles_5m,
+        candles_15m=FakeHyperliquidClient().candles_15m,
+        bbo=BboSnapshot(symbol="BTC", captured_at=now, bid=70100.0, ask=70110.0, mid=70105.0),
+        active_asset_ctx=HyperliquidActiveAssetContext(
+            coin="BTC",
+            mark_price=70105.0,
+            oracle_price=70103.0,
+            mid_price=70105.0,
+            max_leverage=20.0,
+            timestamp=now,
+        ),
+        clearinghouse_state=HyperliquidClearinghouseState(
+            asset_positions=[],
+            cross_margin_summary=HyperliquidMarginSummary(account_value=10_000.0),
+            margin_summary=HyperliquidMarginSummary(account_value=10_000.0),
+            withdrawable=9_500.0,
+            time=now,
+        ),
+        channel_timestamps={
+            "l2Book": now,
+            "candle:5m": now,
+            "candle:15m": now,
+            "bbo": now,
+            "activeAssetCtx": now,
+            "restPrivateBootstrap": now,
+        },
+        channel_snapshot_flags={"restPrivateBootstrap": False},
+    )
+    builder = LiveFrameBuilder(FakeHyperliquidClient(), FakeHeatmapClient(captured_at=now))
+
+    frame = builder.build_from_snapshot(snapshot, allow_synthetic=False)
+
+    assert frame.kill_switch.allow_new_trades is True
+    assert frame.kill_switch.private_state_latency_ms is not None
+
+
+def test_live_frame_channel_age_uses_snapshot_capture_time() -> None:
+    now = datetime.now(tz=UTC)
+    snapshot = LiveStateSnapshot(
+        symbol="BTC",
+        captured_at=now,
+        order_book=OrderBookSnapshot(
+            symbol="BTC",
+            captured_at=now - timedelta(seconds=10),
+            best_bid=70100.0,
+            best_ask=70110.0,
+            mid_price=70105.0,
+            bids=[PriceLevel(price=70100.0, size=8.0, orders=12)],
+            asks=[PriceLevel(price=70110.0, size=9.0, orders=14)],
+        ),
+        candles_5m=[],
+        candles_15m=[],
+        channel_timestamps={"l2Book": now - timedelta(milliseconds=200)},
+    )
+
+    from dex_llm.live_frame import _channel_age_ms
+
+    age_ms = _channel_age_ms(snapshot, ("l2Book",))
+
+    assert age_ms is not None
+    assert age_ms < 300

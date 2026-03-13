@@ -7,6 +7,13 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import httpx
+from playwright.sync_api import (
+    Page,
+    sync_playwright,
+)
+from playwright.sync_api import (
+    TimeoutError as PlaywrightTimeoutError,
+)
 
 from dex_llm.models import Cluster, ClusterShape, ClusterSide, HeatmapSnapshot
 
@@ -228,3 +235,165 @@ class CoinGlassHeatmapClient:
         if isinstance(value, str):
             return int(value)
         raise ValueError(f"Cannot convert {value!r} to int")
+
+
+class CoinGlassLiquidationsPageClient:
+    def __init__(
+        self,
+        *,
+        page_url: str = "https://www.coinglass.com/ko/liquidations",
+        timeout_s: float = 20.0,
+        cache_dir: Path = Path("data/heatmaps"),
+    ) -> None:
+        self.page_url = page_url
+        self.timeout_s = timeout_s
+        self.cache_dir = cache_dir
+        self.user_agent = (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/145.0.0.0 Safari/537.36"
+        )
+
+    def close(self) -> None:
+        return None
+
+    def fetch_heatmap(
+        self,
+        symbol: str,
+        extra_params: Mapping[str, str] | None = None,
+        cache_image: bool = True,
+    ) -> HeatmapSnapshot:
+        _ = extra_params, cache_image
+        symbol = symbol.upper()
+        captured_at = datetime.now(tz=UTC)
+        screenshot_path: str | None = None
+        body_text = ""
+        title = ""
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            page = browser.new_page(
+                user_agent=self.user_agent,
+                locale="ko-KR",
+            )
+            try:
+                page.goto(
+                    self.page_url,
+                    wait_until="domcontentloaded",
+                    timeout=int(self.timeout_s * 1000),
+                )
+                page.wait_for_timeout(5000)
+                title = page.title()
+                body_text = page.locator("body").inner_text()
+                screenshot_path = self._write_screenshot(symbol, captured_at, page)
+            except PlaywrightTimeoutError as exc:
+                raise RuntimeError(f"CoinGlass web scrape timed out: {exc}") from exc
+            finally:
+                browser.close()
+
+        raw_path = self._write_raw_payload(
+            symbol,
+            {
+                "page_url": self.page_url,
+                "captured_at": captured_at.isoformat(),
+                "title": title,
+                "symbol": symbol,
+                "symbol_context": self._extract_symbol_context(body_text, symbol),
+                "body_excerpt": body_text[:8000],
+            },
+            prefix="coinglass-web",
+        )
+        return HeatmapSnapshot(
+            provider="coinglass-web-scrape",
+            symbol=symbol,
+            captured_at=captured_at,
+            clusters_above=[],
+            clusters_below=[],
+            heatmap_image_path=screenshot_path,
+            image_path=screenshot_path,
+            raw_path=raw_path,
+            metadata={
+                "page_url": self.page_url,
+                "title": title,
+                "symbol_context": self._extract_symbol_context(body_text, symbol),
+                "symbol_visible": symbol in body_text.split(),
+                "cluster_source": "playwright-page",
+            },
+        )
+
+    def _write_screenshot(self, symbol: str, captured_at: datetime, page: Page) -> str:
+        images_dir = self.cache_dir / "images"
+        images_dir.mkdir(parents=True, exist_ok=True)
+        stamp = captured_at.strftime("%Y%m%dT%H%M%SZ")
+        path = images_dir / f"coinglass-web-{symbol.lower()}-{stamp}.png"
+        page.screenshot(path=str(path), full_page=True)
+        return str(path)
+
+    def _write_raw_payload(
+        self,
+        symbol: str,
+        payload: object,
+        *,
+        prefix: str,
+    ) -> str:
+        raw_dir = self.cache_dir / "raw"
+        raw_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(tz=UTC).strftime("%Y%m%dT%H%M%SZ")
+        path = raw_dir / f"{prefix}-{symbol.lower()}-{stamp}.json"
+        path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
+        return str(path)
+
+    @staticmethod
+    def _extract_symbol_context(body_text: str, symbol: str) -> list[str]:
+        lines = [line.strip() for line in body_text.splitlines() if line.strip()]
+        for index, line in enumerate(lines):
+            if line.upper() != symbol:
+                continue
+            start = max(0, index - 2)
+            end = min(len(lines), index + 4)
+            return lines[start:end]
+        return []
+
+
+class CoinGlassFallbackHeatmapClient:
+    def __init__(
+        self,
+        primary: CoinGlassHeatmapClient | None,
+        fallback: CoinGlassLiquidationsPageClient | None,
+    ) -> None:
+        self.primary = primary
+        self.fallback = fallback
+
+    def close(self) -> None:
+        if self.primary is not None:
+            self.primary.close()
+        if self.fallback is not None:
+            self.fallback.close()
+
+    def fetch_heatmap(
+        self,
+        symbol: str,
+        extra_params: Mapping[str, str] | None = None,
+        cache_image: bool = True,
+    ) -> HeatmapSnapshot:
+        last_error: Exception | None = None
+        if self.primary is not None:
+            try:
+                return self.primary.fetch_heatmap(
+                    symbol,
+                    extra_params=extra_params,
+                    cache_image=cache_image,
+                )
+            except Exception as exc:
+                last_error = exc
+        if self.fallback is None:
+            if last_error is None:
+                raise ValueError("no CoinGlass provider configured")
+            raise last_error
+        snapshot = self.fallback.fetch_heatmap(
+            symbol,
+            extra_params=extra_params,
+            cache_image=cache_image,
+        )
+        if last_error is not None:
+            snapshot.metadata["api_error"] = str(last_error)
+        return snapshot

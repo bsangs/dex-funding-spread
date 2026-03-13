@@ -246,3 +246,29 @@ def test_ws_state_client_ingests_messages_and_dedupes_fills() -> None:
     )
     assert len(snapshot.recent_fills) == 1
     assert snapshot.recent_user_events[-1].event_type == UserEventType.LIQUIDATION
+
+
+def test_ws_state_client_public_ready_does_not_require_private_snapshot() -> None:
+    client = object.__new__(HyperliquidWsStateClient)
+    client.info = None
+    client.user_address = "0xuser"
+    client._symbol = "BTC"
+    client._lock = threading.Lock()
+    client._order_book = object()
+    client._candles_5m = [object()]
+    client._candles_15m = [object()]
+    client._bbo = object()
+    client._active_asset_ctx = object()
+    client._clearinghouse_state = None
+    client._open_orders = {}
+    client._recent_fills = []
+    client._recent_user_events = []
+    client._channel_timestamps = {}
+    client._channel_snapshot_flags = {}
+    client._subscription_ids = []
+    client._last_ping_at = None
+    client._last_pong_at = None
+
+    client.wait_until_public_ready(timeout_s=0.01)
+
+    assert client.private_state_ready() is False

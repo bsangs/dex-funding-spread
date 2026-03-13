@@ -1,7 +1,13 @@
 from __future__ import annotations
 
-from dex_llm.integrations.coinglass import CoinGlassHeatmapClient
-from dex_llm.models import ClusterSide
+from datetime import UTC, datetime
+
+from dex_llm.integrations.coinglass import (
+    CoinGlassFallbackHeatmapClient,
+    CoinGlassHeatmapClient,
+    CoinGlassLiquidationsPageClient,
+)
+from dex_llm.models import ClusterSide, HeatmapSnapshot
 
 
 def test_parse_heatmap_payload_from_levels_shape() -> None:
@@ -51,3 +57,52 @@ def test_parse_heatmap_payload_from_longs_and_shorts() -> None:
     assert snapshot.clusters_above[0].price == 70350.0
     client.close()
 
+
+def test_fallback_client_uses_playwright_snapshot_when_api_fails() -> None:
+    class BrokenApiClient:
+        def fetch_heatmap(
+            self,
+            symbol: str,
+            extra_params=None,
+            cache_image: bool = True,
+        ) -> HeatmapSnapshot:
+            raise ValueError("Upgrade plan")
+
+        def close(self) -> None:
+            return None
+
+    class FakeWebClient:
+        def fetch_heatmap(
+            self,
+            symbol: str,
+            extra_params=None,
+            cache_image: bool = True,
+        ) -> HeatmapSnapshot:
+            return HeatmapSnapshot(
+                provider="coinglass-web-scrape",
+                symbol=symbol,
+                captured_at=datetime.now(tz=UTC),
+                clusters_above=[],
+                clusters_below=[],
+                heatmap_image_path="data/heatmaps/images/coinglass-web-eth.png",
+                metadata={"symbol_visible": True},
+            )
+
+        def close(self) -> None:
+            return None
+
+    client = CoinGlassFallbackHeatmapClient(BrokenApiClient(), FakeWebClient())
+
+    snapshot = client.fetch_heatmap("ETH")
+
+    assert snapshot.provider == "coinglass-web-scrape"
+    assert snapshot.metadata["api_error"] == "Upgrade plan"
+
+
+def test_web_client_extract_symbol_context() -> None:
+    lines = CoinGlassLiquidationsPageClient._extract_symbol_context(
+        "청산 히트맵\nBTC\n$100K\nETH\n$200K\nSOL\n$50K",
+        "ETH",
+    )
+
+    assert lines == ["BTC", "$100K", "ETH", "$200K", "SOL", "$50K"]

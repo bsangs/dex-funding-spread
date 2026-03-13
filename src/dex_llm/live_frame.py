@@ -153,6 +153,24 @@ class LiveFrameBuilder:
             map_quality = MapQuality.MIXED
         else:
             map_quality = MapQuality.CLEAN
+            if not heatmap_snapshot.clusters_above and not heatmap_snapshot.clusters_below:
+                can_merge_synthetic = allow_synthetic or heatmap_snapshot.provider.startswith(
+                    "coinglass-web-scrape"
+                )
+                if not can_merge_synthetic:
+                    raise RuntimeError(
+                        "Heatmap provider returned no clusters and synthetic fallback is disabled"
+                    )
+                heatmap_snapshot = self._merge_synthetic_clusters(
+                    heatmap_snapshot=heatmap_snapshot,
+                    synthetic_snapshot=self.synthetic_provider.from_orderbook(
+                        symbol=symbol,
+                        book_snapshot_time=book.captured_at,
+                        asks=book.asks,
+                        bids=book.bids,
+                    ),
+                )
+                map_quality = MapQuality.MIXED
 
         private_errors: list[str] = []
         position = PositionState()
@@ -230,6 +248,8 @@ class LiveFrameBuilder:
             metadata["heatmap_error"] = heatmap_errors[0]
         if heatmap_snapshot.raw_path is not None:
             metadata["heatmap_raw_path"] = heatmap_snapshot.raw_path
+        if heatmap_snapshot.metadata:
+            metadata["heatmap_metadata"] = dict(heatmap_snapshot.metadata)
         if user_address:
             metadata["user_address"] = user_address
             metadata["private_state_latency_ms"] = round(private_latency_ms or 0.0, 2)
@@ -313,6 +333,24 @@ class LiveFrameBuilder:
             map_quality = MapQuality.MIXED
         else:
             map_quality = MapQuality.CLEAN
+            if not heatmap_snapshot.clusters_above and not heatmap_snapshot.clusters_below:
+                can_merge_synthetic = allow_synthetic or heatmap_snapshot.provider.startswith(
+                    "coinglass-web-scrape"
+                )
+                if not can_merge_synthetic:
+                    raise RuntimeError(
+                        "Heatmap provider returned no clusters and synthetic fallback is disabled"
+                    )
+                heatmap_snapshot = self._merge_synthetic_clusters(
+                    heatmap_snapshot=heatmap_snapshot,
+                    synthetic_snapshot=self.synthetic_provider.from_orderbook(
+                        symbol=snapshot.symbol,
+                        book_snapshot_time=book.captured_at,
+                        asks=book.asks,
+                        bids=book.bids,
+                    ),
+                )
+                map_quality = MapQuality.MIXED
 
         position = self._build_position_state(
             symbol=snapshot.symbol,
@@ -346,7 +384,13 @@ class LiveFrameBuilder:
         )
         private_age_ms = _channel_age_ms(
             snapshot,
-            ("webData3", "orderUpdates", "userFills", "userEvents"),
+            (
+                "webData3",
+                "orderUpdates",
+                "userFills",
+                "userEvents",
+                "restPrivateBootstrap",
+            ),
         )
 
         frame_timestamp = min(book.captured_at, heatmap_snapshot.captured_at)
@@ -368,6 +412,8 @@ class LiveFrameBuilder:
             metadata["heatmap_error"] = heatmap_errors[0]
         if heatmap_snapshot.raw_path is not None:
             metadata["heatmap_raw_path"] = heatmap_snapshot.raw_path
+        if heatmap_snapshot.metadata:
+            metadata["heatmap_metadata"] = dict(heatmap_snapshot.metadata)
 
         kill_switch = self.kill_switch_policy.evaluate(
             frame_timestamp=frame_timestamp,
@@ -584,6 +630,24 @@ class LiveFrameBuilder:
             trigger_price=order.trigger_price,
         )
 
+    def _merge_synthetic_clusters(
+        self,
+        *,
+        heatmap_snapshot: HeatmapSnapshot,
+        synthetic_snapshot: HeatmapSnapshot,
+    ) -> HeatmapSnapshot:
+        metadata = dict(heatmap_snapshot.metadata)
+        metadata["cluster_source"] = "synthetic-orderbook"
+        metadata["cluster_provider"] = synthetic_snapshot.provider
+        return heatmap_snapshot.model_copy(
+            update={
+                "provider": f"{heatmap_snapshot.provider}+synthetic",
+                "clusters_above": synthetic_snapshot.clusters_above,
+                "clusters_below": synthetic_snapshot.clusters_below,
+                "metadata": metadata,
+            }
+        )
+
 
 def _channel_age_ms(snapshot: LiveStateSnapshot, channels: tuple[str, ...]) -> float | None:
     matched = [
@@ -594,4 +658,5 @@ def _channel_age_ms(snapshot: LiveStateSnapshot, channels: tuple[str, ...]) -> f
     if not matched:
         return None
     newest = max(matched)
-    return max(0.0, (datetime.now(tz=UTC) - newest).total_seconds() * 1000)
+    reference_time = snapshot.captured_at or datetime.now(tz=UTC)
+    return max(0.0, (reference_time - newest).total_seconds() * 1000)
