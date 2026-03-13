@@ -39,6 +39,7 @@ class FakeExchange:
         self.schedule_cancel_calls: list[int | None] = []
         self.modified: list[dict[str, object]] = []
         self.ordered: list[dict[str, object]] = []
+        self.bulk_groupings: list[str] = []
         self.canceled: list[tuple[str, object]] = []
         self.market_closed: list[dict[str, object]] = []
         self.expires_after: int | None = None
@@ -89,6 +90,39 @@ class FakeExchange:
             }
         )
         return {"status": "ok", "response": {"status": "open", "oid": 1}}
+
+    def bulk_orders(
+        self,
+        order_requests: list[dict[str, object]],
+        builder: object | None = None,
+        grouping: str = "na",
+    ) -> dict[str, object]:
+        _ = builder
+        self.bulk_groupings.append(grouping)
+        statuses: list[dict[str, object]] = []
+        for order_request in order_requests:
+            self.ordered.append(
+                {
+                    "name": order_request["coin"],
+                    "is_buy": order_request["is_buy"],
+                    "sz": order_request["sz"],
+                    "limit_px": order_request["limit_px"],
+                    "order_type": order_request["order_type"],
+                    "reduce_only": order_request["reduce_only"],
+                    "cloid": str(order_request.get("cloid")),
+                }
+            )
+            status = self._bulk_status_for_index(len(self.ordered) - 1)
+            oid = len(self.ordered)
+            if status == "filled":
+                statuses.append({"filled": {"oid": oid}})
+            else:
+                statuses.append({"resting": {"oid": oid}})
+        return {"status": "ok", "response": {"data": {"statuses": statuses}}}
+
+    def _bulk_status_for_index(self, index: int) -> str:
+        _ = index
+        return "open"
 
     def modify_order(
         self,
@@ -175,6 +209,11 @@ class FilledEntryExchange(FakeExchange):
         response["response"]["status"] = status
         response["response"]["oid"] = len(self.ordered)
         return response
+
+    def _bulk_status_for_index(self, index: int) -> str:
+        if index < len(self.order_statuses):
+            return self.order_statuses[index]
+        return "open"
 
 
 class BrokenLeverageExchange(FakeExchange):
@@ -696,10 +735,13 @@ def test_execute_plan_places_protection_after_filled_single_resting_entry() -> N
         oracle_price=70005.0,
     )
 
-    assert len(exchange.ordered) == 4
+    assert exchange.bulk_groupings == ["normalTpsl"]
+    assert len(exchange.ordered) == 3
     assert receipts[0].status == OrderState.FILLED
     assert exchange.ordered[0]["sz"] == 0.12
-    assert sum(1 for receipt in receipts if receipt.action == "place") >= 3
+    assert exchange.ordered[1]["order_type"]["trigger"]["tpsl"] == "tp"
+    assert exchange.ordered[2]["order_type"]["trigger"]["tpsl"] == "sl"
+    assert sum(1 for receipt in receipts if receipt.action == "place") == 3
 
 
 def test_execute_plan_rejects_invalid_tp_sl_plan_even_if_validation_is_bypassed() -> None:
@@ -754,11 +796,10 @@ def test_execute_plan_rejects_invalid_tp_sl_plan_even_if_validation_is_bypassed(
     assert not exchange.ordered
 
 
-def test_execute_plan_fail_closes_when_protection_order_cannot_be_placed_after_fill() -> None:
-    exchange = FilledEntryExchange()
+def test_execute_plan_closes_open_position_on_no_trade() -> None:
+    exchange = FakeExchange()
     validator = PreSubmitValidator(
-        {"BTC": AssetMetadata(symbol="BTC", asset_index=0, size_decimals=3, max_leverage=20.0)},
-        max_price_deviation_bps=500.0,
+        {"BTC": AssetMetadata(symbol="BTC", asset_index=0, size_decimals=3, max_leverage=20.0)}
     )
     executor = HyperliquidExchangeExecutor(
         base_url="https://api.hyperliquid.xyz",
@@ -770,16 +811,14 @@ def test_execute_plan_fail_closes_when_protection_order_cannot_be_placed_after_f
         exchange_client=exchange,
     )
     plan = TradePlan(
-        playbook=Playbook.MAGNET_FOLLOW,
-        side=TradeSide.LONG,
-        entry_band=(69990.0, 70010.0),
-        invalid_if=69850.0,
-        tp1=70300.0,
-        tp2=75000.0,
-        ttl_min=20,
-        reason="tp2 is too far and should fail validation after the fill",
-        touch_confidence=0.7,
-        expected_touch_minutes=20,
+        playbook=Playbook.NO_TRADE,
+        side=TradeSide.FLAT,
+        entry_band=(0.0, 0.0),
+        invalid_if=0.0,
+        tp1=0.0,
+        tp2=0.0,
+        ttl_min=0,
+        reason="close the position",
     )
 
     receipts = executor.execute_plan(
@@ -793,7 +832,27 @@ def test_execute_plan_fail_closes_when_protection_order_cannot_be_placed_after_f
         ),
         symbol="BTC",
         frame_timestamp=datetime(2026, 3, 13, 0, 0, tzinfo=UTC),
-        position=PositionState(),
+        position=PositionState(
+            side=TradeSide.LONG,
+            quantity=0.12,
+            open_orders=1,
+            active_orders=[
+                LiveOrderState(
+                    coin="BTC",
+                    side="A",
+                    limit_price=70200.0,
+                    size=0.12,
+                    reduce_only=True,
+                    is_trigger=True,
+                    order_type="trigger",
+                    oid=77,
+                    cloid="0x77777777777777777777777777777777",
+                    status=OrderState.OPEN,
+                    role=OrderRole.TAKE_PROFIT_2,
+                    trigger_price=70200.0,
+                )
+            ],
+        ),
         best_bid=70000.0,
         best_ask=70010.0,
         oracle_price=70005.0,
@@ -802,6 +861,7 @@ def test_execute_plan_fail_closes_when_protection_order_cannot_be_placed_after_f
     assert exchange.market_closed
     assert exchange.market_closed[0]["coin"] == "BTC"
     assert exchange.market_closed[0]["sz"] == pytest.approx(0.12)
+    assert any(receipt.action == "cancel" for receipt in receipts)
     assert any(receipt.action == "emergency_close" for receipt in receipts)
 
 

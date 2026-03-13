@@ -86,6 +86,7 @@ class HyperliquidExchangeExecutor:
         self.keep_size_tolerance_fraction = keep_size_tolerance_fraction
         self.margin_mode = margin_mode
         self.target_leverage = target_leverage
+        self._grouped_entry_cloids: set[str] = set()
 
     def verify_signer(self) -> None:
         derived = self.wallet.address.lower()
@@ -366,6 +367,92 @@ class HyperliquidExchangeExecutor:
             )
         return desired_orders
 
+    def build_grouped_entry_orders(
+        self,
+        *,
+        symbol: str,
+        plan: TradePlan,
+        risk: RiskAssessment,
+        frame_timestamp: datetime,
+        revision: int,
+        strategy_id: str = "dex-llm",
+    ) -> list[DesiredOrder]:
+        target_order: RestingOrderPlan | TradePlan
+        quantity: float
+        if plan.resting_orders:
+            target_order = plan.resting_orders[0]
+            quantity = self._resting_quantities(resting_orders=plan.resting_orders, risk=risk)[0]
+        else:
+            target_order = plan
+            quantity = self._entry_quantity(risk)
+        if quantity <= 0:
+            return []
+        entry_price = sum(target_order.entry_band) / 2
+        exit_side = TradeSide.SHORT if target_order.side == TradeSide.LONG else TradeSide.LONG
+        return [
+            DesiredOrder(
+                symbol=symbol,
+                side=target_order.side,
+                price=entry_price,
+                size=quantity,
+                role=OrderRole.ENTRY,
+                reduce_only=False,
+                order_type={"limit": {"tif": "Gtc"}},
+                cloid=build_deterministic_cloid(
+                    strategy_id,
+                    symbol,
+                    frame_timestamp,
+                    OrderRole.ENTRY,
+                    revision,
+                ),
+                stop_reference_price=target_order.invalid_if,
+            ),
+            DesiredOrder(
+                symbol=symbol,
+                side=exit_side,
+                price=target_order.tp2,
+                size=quantity,
+                role=OrderRole.TAKE_PROFIT_2,
+                reduce_only=True,
+                order_type={
+                    "trigger": {
+                        "triggerPx": target_order.tp2,
+                        "isMarket": False,
+                        "tpsl": "tp",
+                    }
+                },
+                cloid=build_deterministic_cloid(
+                    strategy_id,
+                    symbol,
+                    frame_timestamp,
+                    OrderRole.TAKE_PROFIT_2,
+                    revision,
+                ),
+            ),
+            DesiredOrder(
+                symbol=symbol,
+                side=exit_side,
+                price=target_order.invalid_if,
+                size=quantity,
+                role=OrderRole.STOP_LOSS,
+                reduce_only=True,
+                order_type={
+                    "trigger": {
+                        "triggerPx": target_order.invalid_if,
+                        "isMarket": True,
+                        "tpsl": "sl",
+                    }
+                },
+                cloid=build_deterministic_cloid(
+                    strategy_id,
+                    symbol,
+                    frame_timestamp,
+                    OrderRole.STOP_LOSS,
+                    revision,
+                ),
+            ),
+        ]
+
     def execute_plan(
         self,
         *,
@@ -428,6 +515,19 @@ class HyperliquidExchangeExecutor:
                 )
             ]
 
+        if position.side == TradeSide.FLAT:
+            return self._submit_grouped_entry_workflow(
+                symbol=symbol,
+                plan=plan,
+                risk=risk,
+                frame_timestamp=frame_timestamp,
+                revision=revision,
+                current_orders=position.active_orders,
+                best_bid=best_bid,
+                best_ask=best_ask,
+                oracle_price=oracle_price,
+            )
+
         desired_orders = self.build_orders_from_plan(
             symbol=symbol,
             plan=plan,
@@ -475,6 +575,176 @@ class HyperliquidExchangeExecutor:
             )
             receipts.extend(exit_receipts)
         return receipts
+
+    def _submit_grouped_entry_workflow(
+        self,
+        *,
+        symbol: str,
+        plan: TradePlan,
+        risk: RiskAssessment,
+        frame_timestamp: datetime,
+        revision: int,
+        current_orders: Iterable[LiveOrderState],
+        best_bid: float,
+        best_ask: float,
+        oracle_price: float | None,
+    ) -> list[ExecutionReceipt]:
+        desired_orders = self.build_grouped_entry_orders(
+            symbol=symbol,
+            plan=plan,
+            risk=risk,
+            frame_timestamp=frame_timestamp,
+            revision=revision,
+        )
+        if not desired_orders:
+            return self.reconcile_orders(
+                symbol=symbol,
+                desired_orders=[],
+                current_orders=current_orders,
+                current_position_size=0.0,
+                best_bid=best_bid,
+                best_ask=best_ask,
+                oracle_price=oracle_price,
+            )
+
+        parent_order = desired_orders[0]
+        current_entry_orders = [
+            order
+            for order in current_orders
+            if order.coin == symbol and not order.reduce_only
+        ]
+        receipts = [
+            self.cancel_order(symbol, order)
+            for order in current_orders
+            if order.coin == symbol and order.reduce_only
+        ]
+
+        if len(current_entry_orders) == 1:
+            current_entry = current_entry_orders[0]
+            if (
+                current_entry.cloid in self._grouped_entry_cloids
+                and self._can_keep(current_entry, parent_order)
+            ):
+                receipts.append(
+                    self._receipt(
+                        symbol=symbol,
+                        cloid=current_entry.cloid or parent_order.cloid,
+                        action="keep",
+                        decision=ReconciliationDecision.KEEP,
+                        success=True,
+                        status=current_entry.status,
+                        message="existing grouped entry already matches desired state",
+                    )
+                )
+                return receipts
+
+        for current_entry in current_entry_orders:
+            receipts.append(self.cancel_order(symbol, current_entry))
+
+        receipts.extend(
+            self._place_grouped_entry_orders(
+                desired_orders=desired_orders,
+                best_bid=best_bid,
+                best_ask=best_ask,
+                oracle_price=oracle_price,
+            )
+        )
+        return receipts
+
+    def _place_grouped_entry_orders(
+        self,
+        *,
+        desired_orders: list[DesiredOrder],
+        best_bid: float,
+        best_ask: float,
+        oracle_price: float | None,
+    ) -> list[ExecutionReceipt]:
+        if len(desired_orders) != 3:
+            raise ValueError("grouped entry workflow expects entry, tp, and sl orders")
+        entry_order, tp_order, sl_order = desired_orders
+        entry_validation = self.validator.validate_order(
+            symbol=entry_order.symbol,
+            side=entry_order.side,
+            price=entry_order.price,
+            size=entry_order.size,
+            reduce_only=False,
+            current_position_size=0.0,
+            best_bid=best_bid,
+            best_ask=best_ask,
+            oracle_price=oracle_price,
+            margin_mode=self.margin_mode,
+            target_leverage=self.target_leverage,
+            stop_reference_price=entry_order.stop_reference_price,
+        )
+        if not entry_validation.valid:
+            return [
+                self._receipt(
+                    symbol=entry_order.symbol,
+                    cloid=entry_order.cloid,
+                    action="place",
+                    decision=ReconciliationDecision.PLACE,
+                    success=False,
+                    status=OrderState.REJECTED,
+                    message=entry_validation.reason,
+                )
+            ]
+
+        child_validations = []
+        for child_order in (tp_order, sl_order):
+            validation = self._normalize_grouped_child_order(child_order)
+            if not validation.valid:
+                return [
+                    self._receipt(
+                        symbol=child_order.symbol,
+                        cloid=child_order.cloid,
+                        action="place",
+                        decision=ReconciliationDecision.PLACE,
+                        success=False,
+                        status=OrderState.REJECTED,
+                        message=validation.reason,
+                    )
+                ]
+            child_validations.append(validation)
+
+        order_requests = [
+            self._order_request(entry_order, entry_validation),
+            self._order_request(tp_order, child_validations[0]),
+            self._order_request(sl_order, child_validations[1]),
+        ]
+        try:
+            self._set_expires_after(entry_order.expires_after)
+            self.nonce_manager.next_nonce()
+            response = self.exchange.bulk_orders(order_requests, grouping="normalTpsl")
+            receipts = self._receipts_from_grouped_response(
+                desired_orders=desired_orders,
+                response=response,
+            )
+            if any(
+                receipt.cloid == entry_order.cloid
+                and receipt.success
+                and receipt.status in {OrderState.OPEN, OrderState.FILLED}
+                for receipt in receipts
+            ):
+                self._grouped_entry_cloids.add(entry_order.cloid)
+            return receipts
+        except ClockDriftError as exc:
+            return [
+                self._receipt(
+                    symbol=entry_order.symbol,
+                    cloid=entry_order.cloid,
+                    action="place",
+                    decision=ReconciliationDecision.AWAIT_RESOLUTION,
+                    success=False,
+                    status=OrderState.UNKNOWN,
+                    message=str(exc),
+                )
+            ]
+        except Exception as exc:
+            return [
+                self._resolve_or_fail(entry_order.symbol, entry_order.cloid, "place", exc)
+            ]
+        finally:
+            self._set_expires_after(None)
 
     def reconcile_orders(
         self,
@@ -1073,6 +1343,144 @@ class HyperliquidExchangeExecutor:
             symbol=symbol,
             signed_position_size=signed_position_size,
             reason=reason,
+        )
+
+    def _normalize_grouped_child_order(self, desired: DesiredOrder) -> ValidationResult:
+        meta = self.validator.asset_metadata.get(desired.symbol)
+        if meta is None:
+            return ValidationResult(
+                valid=False,
+                reason=f"missing asset metadata for {desired.symbol}",
+            )
+        if desired.price <= 0 or desired.size <= 0:
+            return ValidationResult(valid=False, reason="price and size must be positive")
+        price = self.validator.quantize_price(desired.symbol, desired.price, asset_meta=meta)
+        size = self.validator.quantize_size(desired.symbol, desired.size, asset_meta=meta)
+        if size <= 0:
+            return ValidationResult(valid=False, reason="size rounds to zero")
+        notional = price * size
+        if notional < self.validator.min_notional:
+            return ValidationResult(valid=False, reason="minimum order notional not met")
+        return ValidationResult(
+            valid=True,
+            reason="ok",
+            price=price,
+            size=size,
+            notional=notional,
+        )
+
+    @staticmethod
+    def _order_request(
+        desired: DesiredOrder,
+        validation: ValidationResult,
+    ) -> dict[str, object]:
+        return {
+            "coin": desired.symbol,
+            "is_buy": desired.side == TradeSide.LONG,
+            "sz": validation.size,
+            "limit_px": validation.price,
+            "order_type": desired.order_type,
+            "reduce_only": desired.reduce_only,
+            "cloid": Cloid.from_str(desired.cloid),
+        }
+
+    def _receipts_from_grouped_response(
+        self,
+        *,
+        desired_orders: list[DesiredOrder],
+        response: Any,
+    ) -> list[ExecutionReceipt]:
+        payload = response if isinstance(response, Mapping) else {"response": response}
+        if isinstance(payload.get("status"), str) and payload["status"].lower() == "err":
+            message = str(payload.get("response", "exchange error"))
+            return [
+                self._receipt(
+                    symbol=desired.symbol,
+                    cloid=desired.cloid,
+                    action="place",
+                    decision=ReconciliationDecision.PLACE,
+                    success=False,
+                    status=OrderState.REJECTED,
+                    message=message,
+                    raw_response=dict(payload),
+                )
+                for desired in desired_orders
+            ]
+
+        statuses: list[object] = []
+        response_payload = payload.get("response")
+        if isinstance(response_payload, Mapping):
+            data = response_payload.get("data")
+            if isinstance(data, Mapping):
+                raw_statuses = data.get("statuses")
+                if isinstance(raw_statuses, list):
+                    statuses = raw_statuses
+
+        receipts: list[ExecutionReceipt] = []
+        for index, desired in enumerate(desired_orders):
+            status_payload = statuses[index] if index < len(statuses) else None
+            receipts.append(
+                self._receipt_from_grouped_status(
+                    desired=desired,
+                    status_payload=status_payload,
+                    response_payload=dict(payload),
+                )
+            )
+        return receipts
+
+    def _receipt_from_grouped_status(
+        self,
+        *,
+        desired: DesiredOrder,
+        status_payload: object,
+        response_payload: dict[str, object],
+    ) -> ExecutionReceipt:
+        if isinstance(status_payload, Mapping):
+            if "error" in status_payload:
+                return self._receipt(
+                    symbol=desired.symbol,
+                    cloid=desired.cloid,
+                    action="place",
+                    decision=ReconciliationDecision.PLACE,
+                    success=False,
+                    status=OrderState.REJECTED,
+                    message=str(status_payload["error"]),
+                    raw_response=response_payload,
+                )
+            if "resting" in status_payload and isinstance(status_payload["resting"], Mapping):
+                return self._receipt(
+                    symbol=desired.symbol,
+                    cloid=desired.cloid,
+                    action="place",
+                    decision=ReconciliationDecision.PLACE,
+                    success=True,
+                    status=OrderState.OPEN,
+                    oid=_extract_oid(status_payload["resting"]),
+                    message="grouped order armed",
+                    raw_response=response_payload,
+                )
+            if "filled" in status_payload and isinstance(status_payload["filled"], Mapping):
+                return self._receipt(
+                    symbol=desired.symbol,
+                    cloid=desired.cloid,
+                    action="place",
+                    decision=ReconciliationDecision.PLACE,
+                    success=True,
+                    status=OrderState.FILLED,
+                    oid=_extract_oid(status_payload["filled"]),
+                    message="grouped order filled immediately",
+                    raw_response=response_payload,
+                )
+
+        return self._receipt(
+            symbol=desired.symbol,
+            cloid=desired.cloid,
+            action="place",
+            decision=ReconciliationDecision.PLACE,
+            success=True,
+            status=OrderState.UNKNOWN,
+            message="grouped order submitted",
+            raw_response=response_payload,
         )
 
     def _set_expires_after(self, expires_after: int | None) -> None:
