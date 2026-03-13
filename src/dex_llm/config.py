@@ -41,12 +41,17 @@ class AppSettings(BaseSettings):
     kill_switch_max_data_age_ms: float = 15_000.0
     kill_switch_max_consecutive_losses: int = 2
     risk_per_trade_pct: float = 0.35
+    cluster_fade_long_weight: float = 0.8
+    cluster_fade_short_weight: float = 0.3
     execution_mode: ExecutionMode = ExecutionMode.PAPER
     margin_mode: MarginMode = MarginMode.ISOLATED
     target_leverage: int = 10
     base_leverage: float = 6.0
     max_leverage: float = 10.0
     max_price_deviation_bps: float = 500.0
+    min_liquidation_gap_pct: float = 7.0
+    max_stop_to_liq_fraction: float = 0.8
+    openai_image_detail: str = "auto"
     clock_drift_limit_ms: float = 500.0
 
     model_config = SettingsConfigDict(

@@ -25,6 +25,7 @@ from dex_llm.models import (
     PositionState,
     ReconciliationDecision,
     RestingOrderPlan,
+    RiskAssessment,
     TradePlan,
     TradeSide,
 )
@@ -213,6 +214,50 @@ def test_pre_submit_validator_quantizes_and_blocks_bad_reduce_only() -> None:
     )
     assert bad_result.valid is False
     assert "reduce-only" in bad_result.reason
+
+
+def test_pre_submit_validator_blocks_cross_entries_without_liquidation_guard() -> None:
+    validator = PreSubmitValidator(
+        {"ETH": AssetMetadata(symbol="ETH", asset_index=0, size_decimals=3, max_leverage=20.0)}
+    )
+
+    result = validator.validate_order(
+        symbol="ETH",
+        side=TradeSide.LONG,
+        price=4000.0,
+        size=0.2,
+        reduce_only=False,
+        best_bid=3999.0,
+        best_ask=4001.0,
+        margin_mode=MarginMode.CROSS,
+        target_leverage=10,
+        stop_reference_price=3970.0,
+    )
+
+    assert result.valid is False
+    assert "cross-mode" in result.reason
+
+
+def test_pre_submit_validator_blocks_when_stop_is_too_close_to_liquidation() -> None:
+    validator = PreSubmitValidator(
+        {"ETH": AssetMetadata(symbol="ETH", asset_index=0, size_decimals=3, max_leverage=20.0)}
+    )
+
+    result = validator.validate_order(
+        symbol="ETH",
+        side=TradeSide.LONG,
+        price=4000.0,
+        size=0.2,
+        reduce_only=False,
+        best_bid=3999.0,
+        best_ask=4001.0,
+        margin_mode=MarginMode.ISOLATED,
+        target_leverage=10,
+        stop_reference_price=3740.0,
+    )
+
+    assert result.valid is False
+    assert "liquidation buffer" in result.reason
 
 
 def test_rate_limit_budgeter_soft_degrades_on_pressure() -> None:
@@ -431,8 +476,15 @@ def test_execute_plan_places_protection_after_filled_cluster_fade_entry() -> Non
 
     receipts = executor.execute_plan(
         plan=plan,
+        risk=RiskAssessment(
+            allowed=True,
+            reason="risk checks passed",
+            recommended_quantity=0.12,
+            resting_order_quantities=[0.12, 0.05],
+            recommended_notional=1193.0,
+            risk_budget=35.0,
+        ),
         symbol="BTC",
-        quantity=0.1,
         frame_timestamp=datetime(2026, 3, 13, 0, 0, tzinfo=UTC),
         position=PositionState(),
         best_bid=70000.0,
@@ -442,6 +494,10 @@ def test_execute_plan_places_protection_after_filled_cluster_fade_entry() -> Non
 
     assert len(exchange.ordered) == 5
     assert receipts[0].status == OrderState.FILLED
+    assert any(receipt.action == "cancel" for receipt in receipts)
+    assert exchange.canceled
+    assert exchange.ordered[0]["sz"] == 0.12
+    assert exchange.ordered[1]["sz"] == 0.05
     assert sum(1 for receipt in receipts if receipt.action == "place") >= 4
 
 

@@ -5,7 +5,15 @@ from pathlib import Path
 
 from dex_llm.features.extractor import FeatureExtractor
 from dex_llm.llm.router import HeuristicPlaybookRouter
-from dex_llm.models import AccountState, MarketFrame, PositionState, TradeSide
+from dex_llm.models import (
+    AccountState,
+    MarketFrame,
+    Playbook,
+    PositionState,
+    RestingOrderPlan,
+    TradePlan,
+    TradeSide,
+)
 from dex_llm.risk.policy import RiskPolicy
 
 
@@ -48,3 +56,43 @@ def test_risk_policy_blocks_when_kill_switch_is_active() -> None:
 
     assert assessment.allowed is False
     assert "private account state unavailable" in assessment.reason
+
+
+def test_risk_policy_allocates_asymmetric_cluster_fade_quantities() -> None:
+    account = AccountState(equity=10_000.0, available_margin=10_000.0, max_leverage=10.0)
+    plan = TradePlan(
+        playbook=Playbook.CLUSTER_FADE,
+        side=TradeSide.FLAT,
+        entry_band=(0.0, 0.0),
+        invalid_if=0.0,
+        tp1=0.0,
+        tp2=0.0,
+        ttl_min=30,
+        reason="arm both bands",
+        resting_orders=[
+            RestingOrderPlan(
+                side=TradeSide.LONG,
+                entry_band=(3998.0, 4002.0),
+                invalid_if=3970.0,
+                tp1=4025.0,
+                tp2=4040.0,
+                ttl_min=30,
+                reason="lower long fade",
+            ),
+            RestingOrderPlan(
+                side=TradeSide.SHORT,
+                entry_band=(4048.0, 4052.0),
+                invalid_if=4075.0,
+                tp1=4025.0,
+                tp2=4010.0,
+                ttl_min=30,
+                reason="upper short fade",
+            ),
+        ],
+    )
+
+    assessment = RiskPolicy().assess(plan, account, PositionState(), None)
+
+    assert assessment.allowed is True
+    assert len(assessment.resting_order_quantities) == 2
+    assert assessment.resting_order_quantities[0] > assessment.resting_order_quantities[1]

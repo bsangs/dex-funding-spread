@@ -47,9 +47,6 @@ class HeuristicPlaybookRouter:
         if features.sweep_reclaim_ready and frame.sweep.touched_cluster_side is not None:
             return self._sweep_reclaim(frame)
 
-        if frame.clusters_above and frame.clusters_below:
-            return self._cluster_fade(frame)
-
         if (
             features.dominant_cluster_side is not None
             and features.dominant_ratio >= self.dominant_ratio_threshold
@@ -71,6 +68,9 @@ class HeuristicPlaybookRouter:
                     "and only trade the second move"
                 ),
             )
+
+        if features.cluster_fade_ready:
+            return self._cluster_fade(frame)
 
         return self._flat_plan("cluster map does not offer a clean directional or reclaim setup")
 

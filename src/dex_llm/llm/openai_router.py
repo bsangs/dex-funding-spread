@@ -4,7 +4,7 @@ from pathlib import Path
 
 from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI
 
-from dex_llm.llm.prompting import load_prompt_template, render_router_prompt
+from dex_llm.llm.prompting import build_router_input, load_prompt_template
 from dex_llm.llm.router import HeuristicPlaybookRouter, RouterProtocol
 from dex_llm.models import FeatureSnapshot, MarketFrame, TradePlan
 
@@ -24,6 +24,7 @@ class OpenAIRouter:
         reasoning_summary: str = "auto",
         store: bool = True,
         include: list[str] | None = None,
+        image_detail: str = "auto",
         client: OpenAI | None = None,
         fallback_router: RouterProtocol | None = None,
     ) -> None:
@@ -34,6 +35,7 @@ class OpenAIRouter:
         self.reasoning_effort = reasoning_effort
         self.reasoning_summary = reasoning_summary
         self.store = store
+        self.image_detail = image_detail
         self.include = include or [
             "reasoning.encrypted_content",
             "web_search_call.action.sources",
@@ -47,10 +49,11 @@ class OpenAIRouter:
         if not frame.kill_switch.allow_new_trades:
             return self.fallback_router.route(frame, features)
 
-        prompt = render_router_prompt(
+        prompt = build_router_input(
             frame=frame,
             features=features,
             template=self._load_template(),
+            image_detail=self.image_detail,
         )
         last_error: Exception | None = None
         attempts = max(1, self.max_attempts)

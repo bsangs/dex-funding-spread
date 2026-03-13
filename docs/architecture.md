@@ -2,12 +2,13 @@
 
 ## Intent
 
-This codebase is optimized for replay-first strategy work on a single DEX. The priority is not live execution breadth. The priority is being able to answer:
+This codebase is optimized for replay-first strategy development on a single DEX, but the live path is designed to survive real execution constraints:
 
-1. What did the map look like?
-2. What structured features were extracted?
-3. Which playbook was chosen?
-4. Did code-level risk rules allow the trade?
+1. What did the liquidation map look like?
+2. Which deterministic features were extracted?
+3. Which playbook was selected?
+4. Did code-level safety rules allow the order?
+5. If `cluster_fade` armed both sides, did the opposite entry get removed after the first fill?
 
 ## Pipeline
 
@@ -18,11 +19,11 @@ collector -> frame store -> replay session -> feature extractor
           -> analytics
 ```
 
-Live collection currently looks like this:
+Live collection and execution currently looks like this:
 
 ```text
 Hyperliquid websocket -> l2Book + candle + bbo + activeAssetCtx
-Hyperliquid websocket -> webData2 + orderUpdates + userEvents + userFills
+Hyperliquid websocket -> webData3 + orderUpdates + userEvents + userFills
 Hyperliquid REST      -> meta + userFillsByTime + orderStatus + historicalOrders + rate limits
 CoinGlass heatmap API -> liquidation clusters + optional image cache
                      \-> LiveFrameBuilder -> MarketFrame JSONL + kill-switch state
@@ -34,42 +35,52 @@ CoinGlass heatmap API -> liquidation clusters + optional image cache
   Persists typed `MarketFrame` snapshots as JSONL.
 
 - `integrations/`
-  Fetches public and private snapshots from Hyperliquid and liquidation-map data from CoinGlass.
+  Fetches public/private Hyperliquid state and CoinGlass liquidation-map data.
 
 - `replay/`
-  Replays stored frames so router behavior can be compared over time.
+  Replays stored frames so routing and safety behavior can be compared over time.
 
 - `features/`
-  Converts raw clusters into deterministic context such as dominance ratio, directional vacuum, and reclaim readiness.
+  Converts raw clusters into deterministic context such as dominance ratio, cluster balance, directional vacuum, reclaim readiness, and cluster-fade readiness.
 
 - `llm/`
-  Renders the prompt contract, ships the heuristic baseline router, and optionally calls OpenAI with structured outputs.
-  The router must respect the kill-switch and keep the LLM on playbook selection only.
+  Renders the prompt contract, exposes the heuristic baseline router, and optionally calls OpenAI with structured outputs plus attached heatmap images.
+  The LLM chooses a playbook only. It does not choose size or override safety policy.
 
 - `risk/`
-  Owns all hard guards: kill-switch evaluation, no averaging down, two-loss stop, and size capping from stop distance and leverage.
+  Owns hard guards: kill-switch evaluation, no averaging down, loss-streak stops, per-side cluster-fade sizing, and liquidation buffer enforcement.
 
 - `executor/`
   Turns approved plans into paper tickets or live Hyperliquid orders.
-  Nonce tracking, pre-submit validation, ambiguous-state resolution, and reconciliation live here.
+  Nonce tracking, pre-submit validation, ambiguous-state resolution, deterministic cloids, and post-fill cluster-fade cleanup live here.
 
 - `analytics/`
   Summarizes outcomes by playbook after replay or paper trading.
 
-## Current default playbook contract
+## Playbook contract
 
 The router may only return:
 
+- `cluster_fade`
 - `magnet_follow`
 - `sweep_reclaim`
 - `double_sweep`
 - `no_trade`
 
-`double_sweep` is intentionally a watch-state output. It can return `side = flat`.
+Priority is intentionally biased toward directional clarity before balanced fades:
 
-## Current live path
+1. `sweep_reclaim`
+2. `magnet_follow`
+3. `double_sweep`
+4. `cluster_fade`
+5. `no_trade`
 
-1. `live-frame` builds a frame from WS caches plus CoinGlass heatmap and keeps synthetic fallback observe-only.
-2. `route-live` produces features, router output, and risk assessment from the current live frame.
-3. `sync-live` inspects account state, open orders, and rate-limit posture before any new entry is attempted.
-4. `execute-live` stays paper by default and only submits real Hyperliquid orders when `--live` is present.
+`double_sweep` remains a watch-state output and can return `side = flat`.
+
+## Safety contract
+
+- live private freshness is measured from `webData3`, `orderUpdates`, `userFills`, and `userEvents`
+- synthetic heatmap fallback disables new entries
+- isolated entries must satisfy minimum liquidation gap and stop-to-liquidation buffer checks
+- cross-mode entry validation is fail-closed in v1
+- `cluster_fade` keeps asymmetric risk weights and cancels the opposite resting entry after the first fill

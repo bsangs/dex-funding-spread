@@ -263,7 +263,14 @@ class LiveFrameBuilder:
             clusters_above=heatmap_snapshot.clusters_above[:3],
             clusters_below=heatmap_snapshot.clusters_below[:3],
             atr=max(compute_atr(candles_15m), 1.0),
-            heatmap_path=heatmap_snapshot.image_path or heatmap_snapshot.image_url,
+            heatmap_path=(
+                heatmap_snapshot.heatmap_image_path
+                or heatmap_snapshot.heatmap_image_url
+                or heatmap_snapshot.image_path
+                or heatmap_snapshot.image_url
+            ),
+            heatmap_image_path=heatmap_snapshot.heatmap_image_path or heatmap_snapshot.image_path,
+            heatmap_image_url=heatmap_snapshot.heatmap_image_url or heatmap_snapshot.image_url,
             map_quality=map_quality,
             sweep=self._infer_sweep_state(candles_5m, heatmap_snapshot),
             position=position,
@@ -339,7 +346,7 @@ class LiveFrameBuilder:
         )
         private_age_ms = _channel_age_ms(
             snapshot,
-            ("webData2", "orderUpdates", "userFills", "user"),
+            ("webData3", "orderUpdates", "userFills", "userEvents"),
         )
 
         frame_timestamp = min(book.captured_at, heatmap_snapshot.captured_at)
@@ -386,7 +393,14 @@ class LiveFrameBuilder:
             clusters_above=heatmap_snapshot.clusters_above[:3],
             clusters_below=heatmap_snapshot.clusters_below[:3],
             atr=max(compute_atr(snapshot.candles_15m), 1.0),
-            heatmap_path=heatmap_snapshot.image_path or heatmap_snapshot.image_url,
+            heatmap_path=(
+                heatmap_snapshot.heatmap_image_path
+                or heatmap_snapshot.heatmap_image_url
+                or heatmap_snapshot.image_path
+                or heatmap_snapshot.image_url
+            ),
+            heatmap_image_path=heatmap_snapshot.heatmap_image_path or heatmap_snapshot.image_path,
+            heatmap_image_url=heatmap_snapshot.heatmap_image_url or heatmap_snapshot.image_url,
             map_quality=map_quality,
             sweep=self._infer_sweep_state(snapshot.candles_5m, heatmap_snapshot),
             position=position,

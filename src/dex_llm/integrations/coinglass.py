@@ -53,7 +53,13 @@ class CoinGlassHeatmapClient:
         image_path: str | None = None
         if cache_image and snapshot.image_url is not None:
             image_path = self._download_image(symbol, snapshot.image_url)
-        return snapshot.model_copy(update={"raw_path": raw_path, "image_path": image_path})
+        return snapshot.model_copy(
+            update={
+                "raw_path": raw_path,
+                "image_path": image_path,
+                "heatmap_image_path": image_path,
+            }
+        )
 
     def parse_heatmap_payload(self, symbol: str, payload: object) -> HeatmapSnapshot:
         normalized = self._normalize(payload)
@@ -66,6 +72,7 @@ class CoinGlassHeatmapClient:
             captured_at=timestamp,
             clusters_above=clusters_above,
             clusters_below=clusters_below,
+            heatmap_image_url=image_url,
             image_url=image_url,
             metadata={"response_keys": list(normalized.keys())},
         )

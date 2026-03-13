@@ -8,9 +8,13 @@ class FeatureExtractor:
         self,
         dominant_ratio_threshold: float = 1.6,
         double_sweep_atr_multiple: float = 0.8,
+        cluster_fade_balance_threshold: float = 0.65,
+        cluster_fade_distance_atr_multiple: float = 1.25,
     ) -> None:
         self.dominant_ratio_threshold = dominant_ratio_threshold
         self.double_sweep_atr_multiple = double_sweep_atr_multiple
+        self.cluster_fade_balance_threshold = cluster_fade_balance_threshold
+        self.cluster_fade_distance_atr_multiple = cluster_fade_distance_atr_multiple
 
     def extract(self, frame: MarketFrame) -> FeatureSnapshot:
         top_above = self._largest_cluster(frame.clusters_above)
@@ -18,6 +22,7 @@ class FeatureExtractor:
         above_total = sum(cluster.size for cluster in frame.clusters_above[:3])
         below_total = sum(cluster.size for cluster in frame.clusters_below[:3])
         dominant_ratio = self._dominant_ratio(above_total, below_total)
+        cluster_balance_ratio = self._cluster_balance_ratio(above_total, below_total)
         dominant_side = self._dominant_side(above_total, below_total, dominant_ratio)
         closest_above_distance = self._closest_distance(frame.current_price, frame.clusters_above)
         closest_below_distance = self._closest_distance(frame.current_price, frame.clusters_below)
@@ -36,26 +41,41 @@ class FeatureExtractor:
             and closest_above_distance <= frame.atr * self.double_sweep_atr_multiple
             and closest_below_distance <= frame.atr * self.double_sweep_atr_multiple
         )
+        cluster_fade_ready = (
+            top_above is not None
+            and top_below is not None
+            and cluster_balance_ratio >= self.cluster_fade_balance_threshold
+            and closest_above_distance is not None
+            and closest_below_distance is not None
+            and closest_above_distance <= frame.atr * self.cluster_fade_distance_atr_multiple
+            and closest_below_distance <= frame.atr * self.cluster_fade_distance_atr_multiple
+            and not directional_vacuum
+        )
 
         notes: list[str] = []
         if dominant_side is not None:
             notes.append(f"dominant_{dominant_side.value}:{dominant_ratio:.2f}")
+        notes.append(f"cluster_balance:{cluster_balance_ratio:.2f}")
         if sweep_reclaim_ready:
             notes.append("sweep_reclaim_ready")
         if double_sweep_ready:
             notes.append("double_sweep_ready")
+        if cluster_fade_ready:
+            notes.append("cluster_fade_ready")
         if frame.map_quality.value != "clean":
             notes.append(f"map_quality:{frame.map_quality.value}")
 
         return FeatureSnapshot(
             dominant_cluster_side=dominant_side,
             dominant_ratio=dominant_ratio,
+            cluster_balance_ratio=cluster_balance_ratio,
             closest_above_distance=closest_above_distance,
             closest_below_distance=closest_below_distance,
             top_above=top_above,
             top_below=top_below,
             sweep_reclaim_ready=sweep_reclaim_ready,
             double_sweep_ready=double_sweep_ready,
+            cluster_fade_ready=cluster_fade_ready,
             directional_vacuum=directional_vacuum,
             notes=notes,
         )
@@ -84,6 +104,12 @@ class FeatureExtractor:
         if below_total > above_total:
             return ClusterSide.BELOW
         return None
+
+    def _cluster_balance_ratio(self, above_total: float, below_total: float) -> float:
+        larger = max(above_total, below_total)
+        if larger == 0:
+            return 0.0
+        return min(above_total, below_total) / larger
 
     def _closest_distance(self, current_price: float, clusters: list[Cluster]) -> float | None:
         distances: list[float] = []
@@ -114,4 +140,3 @@ class FeatureExtractor:
                 and frame.current_price - top_below.price >= frame.atr * 0.5
             )
         return False
-

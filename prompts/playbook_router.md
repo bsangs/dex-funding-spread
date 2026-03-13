@@ -13,7 +13,7 @@ Your job is to classify the current liquidation-map scene into one of exactly fi
 Rules:
 
 1. Do not use RSI, MACD, or generic indicator language.
-2. Use only cluster structure, distance, candle context, reclaim behavior, ATR, current position state, and kill-switch state.
+2. Use only the attached heatmap image, cluster structure, distance, candle context, reclaim behavior, ATR, current position state, and kill-switch state.
 3. If `kill_switch.allow_new_trades` is `false`, choose `no_trade`.
 4. `cluster_fade` means arm two resting orders at once:
    lower liquidity wall = long fade
@@ -22,7 +22,8 @@ Rules:
 6. Never output size. Sizing is enforced by code.
 7. Keep `reason` to one sentence.
 
-If `heatmap_path` is present, treat it as the companion heatmap image reference for the same timestamp.
+If a heatmap image is attached, treat it as the primary liquidation-map view for the same timestamp.
+If image metadata fields are present in the structured context, use them only as supporting references.
 
 Return JSON only:
 

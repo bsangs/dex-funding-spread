@@ -1,84 +1,84 @@
 {
   "timestamp": "2026-03-11T15:00:00Z",
   "exchange": "hyperliquid",
-  "symbol": "BTC",
-  "current_price": 101250.0,
+  "symbol": "ETH",
+  "current_price": 3980.0,
   "candles_5m": [
     {
       "ts": "2026-03-11T14:40:00Z",
-      "open": 100810.0,
-      "high": 100990.0,
-      "low": 100760.0,
-      "close": 100940.0,
+      "open": 3928.0,
+      "high": 3946.0,
+      "low": 3918.0,
+      "close": 3942.0,
       "volume": 138.5
     },
     {
       "ts": "2026-03-11T14:45:00Z",
-      "open": 100940.0,
-      "high": 101180.0,
-      "low": 100900.0,
-      "close": 101120.0,
+      "open": 3942.0,
+      "high": 3964.0,
+      "low": 3935.0,
+      "close": 3958.0,
       "volume": 149.1
     },
     {
       "ts": "2026-03-11T14:50:00Z",
-      "open": 101120.0,
-      "high": 101310.0,
-      "low": 101040.0,
-      "close": 101260.0,
+      "open": 3958.0,
+      "high": 3986.0,
+      "low": 3952.0,
+      "close": 3981.0,
       "volume": 153.2
     },
     {
       "ts": "2026-03-11T14:55:00Z",
-      "open": 101260.0,
-      "high": 101340.0,
-      "low": 101160.0,
-      "close": 101250.0,
+      "open": 3981.0,
+      "high": 3988.0,
+      "low": 3972.0,
+      "close": 3980.0,
       "volume": 127.4
     }
   ],
   "candles_15m": [
     {
       "ts": "2026-03-11T14:00:00Z",
-      "open": 100220.0,
-      "high": 100860.0,
-      "low": 100100.0,
-      "close": 100790.0,
+      "open": 3898.0,
+      "high": 3938.0,
+      "low": 3886.0,
+      "close": 3926.0,
       "volume": 401.0
     },
     {
       "ts": "2026-03-11T14:15:00Z",
-      "open": 100790.0,
-      "high": 101090.0,
-      "low": 100680.0,
-      "close": 100940.0,
+      "open": 3926.0,
+      "high": 3968.0,
+      "low": 3912.0,
+      "close": 3956.0,
       "volume": 418.2
     },
     {
       "ts": "2026-03-11T14:30:00Z",
-      "open": 100940.0,
-      "high": 101340.0,
-      "low": 100900.0,
-      "close": 101250.0,
+      "open": 3956.0,
+      "high": 3988.0,
+      "low": 3944.0,
+      "close": 3980.0,
       "volume": 429.4
     }
   ],
   "clusters_above": [
     {
       "side": "above",
-      "price": 101900.0,
+      "price": 4015.0,
       "size": 185.0,
       "shape": "single_wall"
     },
     {
       "side": "above",
-      "price": 102350.0,
+      "price": 4045.0,
       "size": 120.0,
       "shape": "staircase"
     },
     {
       "side": "above",
-      "price": 102900.0,
+      "price": 4080.0,
       "size": 90.0,
       "shape": "diffuse"
     }
@@ -86,25 +86,27 @@
   "clusters_below": [
     {
       "side": "below",
-      "price": 100950.0,
+      "price": 3945.0,
       "size": 70.0,
       "shape": "staircase"
     },
     {
       "side": "below",
-      "price": 100400.0,
+      "price": 3910.0,
       "size": 55.0,
       "shape": "single_wall"
     },
     {
       "side": "below",
-      "price": 99800.0,
+      "price": 3875.0,
       "size": 40.0,
       "shape": "diffuse"
     }
   ],
-  "atr": 420.0,
-  "heatmap_path": "heatmaps/sample-btc-20260311T150000Z.png",
+  "atr": 35.0,
+  "heatmap_path": "heatmaps/sample-eth-20260311T150000Z.png",
+  "heatmap_image_path": "heatmaps/sample-eth-20260311T150000Z.png",
+  "heatmap_image_url": null,
   "map_quality": "clean",
   "sweep": {
     "touched_cluster_side": null,
@@ -119,4 +121,3 @@
     "consecutive_losses_today": 0
   }
 }
-

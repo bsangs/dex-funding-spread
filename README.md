@@ -1,25 +1,31 @@
 # Dex LLM
 
-Single-DEX liquidation-map trading scaffold for a `Magnet Follow + Sweep Reclaim` playbook router.
+Single-DEX liquidation-map trading engine for Hyperliquid with CoinGlass clusters, OpenAI structured routing, and WS-first account state.
 
-This repo is set up for replay-first development:
+The default runtime is now aligned around ETH and a five-playbook contract:
 
-- collect heatmap and market context as replayable frames
-- extract deterministic features before asking an LLM anything
-- let the LLM choose a playbook, not invent position sizing
-- keep sizing, invalidation, loss limits, and kill switches in code
-- pull live market data from Hyperliquid and, when configured, liquidation-map data from CoinGlass
-
-## Why this shape
-
-The strategy discussed in this project is not an indicator bot. It is a scene-classification engine:
-
+- `cluster_fade`
 - `magnet_follow`
 - `sweep_reclaim`
 - `double_sweep`
 - `no_trade`
 
-That means the most important artifact is not the order engine. It is a replayable dataset of liquidation-map frames plus a strict routing contract.
+## Why this shape
+
+This repo is built for replay-first strategy work, but the live path is no longer a paper-only scaffold:
+
+- Hyperliquid is the single execution venue
+- CoinGlass provides the liquidation-map clusters and optional cached heatmap images
+- OpenAI routing stays schema-bound and playbook-only
+- risk, sizing, liquidation buffers, and kill-switches stay in code
+- live private state is WS-first with REST reserved for bootstrap, pagination, and recovery
+
+`cluster_fade` is handled as a real two-leg entry workflow:
+
+- lower wall = resting long fade
+- upper wall = resting short fade
+- per-side sizing defaults to `long=0.8`, `short=0.3` risk weights
+- once one side fills, the opposite entry is canceled and only the filled side keeps protection orders
 
 ## Project layout
 
@@ -36,9 +42,9 @@ src/dex_llm/
 
 .planning/      GSD project tracking docs and quick-task history
 configs/        example runtime config
-examples/       sample replay frame
+examples/       sample ETH replay frame
 prompts/        LLM system prompt contract
-tests/          scaffold verification
+tests/          regression coverage
 ```
 
 ## Quick start
@@ -47,49 +53,47 @@ tests/          scaffold verification
 uv sync --dev
 uv run dex-llm inspect examples/sample_frame.json
 uv run dex-llm prompt examples/sample_frame.json
-uv run dex-llm hyperliquid-snapshot BTC
-uv run dex-llm live-frame BTC --allow-synthetic
-uv run dex-llm route-live BTC --allow-synthetic
+uv run dex-llm hyperliquid-snapshot ETH
+uv run dex-llm live-frame ETH --allow-synthetic
+uv run dex-llm route-live ETH --allow-synthetic
 uv run pytest
 ```
 
-If you have a CoinGlass API key, set `DEX_LLM_COINGLASS_API_KEY` and pass any endpoint-specific query params with repeated `--heatmap-param key=value` options.
+If you have a CoinGlass API key, set `DEX_LLM_COINGLASS_API_KEY` and pass any endpoint-specific params with repeated `--heatmap-param key=value` options.
 
 ```bash
 export DEX_LLM_COINGLASS_API_KEY=...
-uv run dex-llm coinglass-preview BTC --heatmap-param symbol=BTC
-uv run dex-llm live-frame BTC --heatmap-param symbol=BTC --allow-synthetic
+uv run dex-llm coinglass-preview ETH --heatmap-param symbol=ETH
+uv run dex-llm live-frame ETH --heatmap-param symbol=ETH --allow-synthetic
 ```
 
-If you want live WS state, routing, and execution, separate the trading account from the signer:
+For live WS state, routing, and execution, keep the signer separate from the trading account:
 
 ```bash
 export DEX_LLM_TRADING_USER_ADDRESS=0x...
 export DEX_LLM_SIGNER_AGENT_ADDRESS=0x...
 export DEX_LLM_SIGNER_PRIVATE_KEY=0x...
 export DEX_LLM_OPENAI_API_KEY=...
-uv run dex-llm live-frame BTC --user-address 0x... --heatmap-param symbol=BTC
-uv run dex-llm route-live BTC --user-address 0x... --allow-synthetic
-uv run dex-llm sync-live BTC --user-address 0x...
-uv run dex-llm execute-live BTC --user-address 0x... --live
+uv run dex-llm live-frame ETH --user-address 0x... --heatmap-param symbol=ETH
+uv run dex-llm route-live ETH --user-address 0x... --allow-synthetic
+uv run dex-llm sync-live ETH --user-address 0x...
+uv run dex-llm execute-live ETH --user-address 0x... --live
 ```
 
 ## Current defaults
 
 - Python-first implementation
-- single DEX focus
-- replay-first workflow
-- heuristic baseline router remains as the fallback when OpenAI routing times out or fails schema validation
-- risk engine blocks averaging down and stops after two consecutive losses
-- Hyperliquid live state is WS-first and REST is reserved for bootstrap, pagination, and order-state recovery
-- live execution stays paper-by-default; `execute-live --live` is required before any real order submission
-- synthetic fallback is observe-only and keeps new trades disabled when CoinGlass is unavailable
+- ETH as the default symbol
+- single-venue execution on Hyperliquid
+- OpenAI Responses API with structured output and multimodal heatmap input when an image is available
+- heuristic router remains the fallback when OpenAI times out or fails schema validation
+- `cluster_fade` is gated by balance and distance checks instead of firing whenever both sides exist
+- liquidation buffers, no-averaging-down, and consecutive-loss limits are enforced in code
+- synthetic heatmaps remain observe-only and disable new entries
 
-## Suggested build order
+## Safety notes
 
-1. Configure CoinGlass query params for the exact liquidation endpoint you want to use.
-2. Record JSONL sessions and cached heatmap artifacts from `dex-llm live-frame`.
-3. Feed a Hyperliquid trading address into live frames so the kill-switch can gate new trades from real account state.
-4. Compare heuristic router vs OpenAI router with `dex-llm route-live`.
-5. Validate sync and reconciliation with `dex-llm sync-live`.
-6. Only then open live order permissions with `dex-llm execute-live --live`.
+- cross-mode entry validation is intentionally fail-closed in v1
+- isolated entries must pass both minimum liquidation gap and stop-to-liquidation buffer checks
+- private freshness is derived from `webData3`, `orderUpdates`, `userFills`, and `userEvents`
+- live order submission still requires `execute-live --live`

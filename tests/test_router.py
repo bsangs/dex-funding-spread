@@ -5,23 +5,64 @@ from pathlib import Path
 
 from dex_llm.features.extractor import FeatureExtractor
 from dex_llm.llm.router import HeuristicPlaybookRouter
-from dex_llm.models import ClusterSide, MarketFrame, Playbook, TradeSide
+from dex_llm.models import ClusterShape, ClusterSide, MarketFrame, Playbook, TradeSide
 
 
 def load_sample_frame() -> MarketFrame:
     return MarketFrame.model_validate(json.loads(Path("examples/sample_frame.json").read_text()))
 
 
-def test_router_returns_cluster_fade_for_sample_frame() -> None:
+def test_router_prefers_magnet_follow_for_directional_vacuum_sample() -> None:
     frame = load_sample_frame()
     features = FeatureExtractor().extract(frame)
 
     plan = HeuristicPlaybookRouter().route(frame, features)
 
+    assert plan.playbook == Playbook.MAGNET_FOLLOW
+    assert plan.side == TradeSide.LONG
+
+
+def test_router_returns_cluster_fade_only_when_clusters_are_balanced() -> None:
+    frame = load_sample_frame()
+    frame.clusters_above[0].shape = ClusterShape.STAIRCASE
+    frame.clusters_above[0].price = frame.current_price + frame.atr
+    frame.clusters_above[0].size = 122.0
+    frame.clusters_above[1].size = 110.0
+    frame.clusters_above[2].size = 95.0
+    frame.clusters_below[0].price = frame.current_price - frame.atr
+    frame.clusters_below[0].size = 120.0
+    frame.clusters_below[1].size = 108.0
+    frame.clusters_below[2].size = 96.0
+    features = FeatureExtractor().extract(frame)
+
+    plan = HeuristicPlaybookRouter().route(frame, features)
+
+    assert features.cluster_fade_ready is True
     assert plan.playbook == Playbook.CLUSTER_FADE
     assert plan.side == TradeSide.FLAT
     assert len(plan.resting_orders) == 2
     assert {order.side for order in plan.resting_orders} == {TradeSide.LONG, TradeSide.SHORT}
+
+
+def test_router_prefers_double_sweep_before_cluster_fade() -> None:
+    frame = load_sample_frame()
+    frame.clusters_above[0].shape = ClusterShape.STAIRCASE
+    frame.clusters_above[0].price = frame.current_price + (frame.atr * 0.5)
+    frame.clusters_above[0].size = 118.0
+    frame.clusters_above[1].size = 102.0
+    frame.clusters_above[2].size = 90.0
+    frame.clusters_below[0].price = frame.current_price - (frame.atr * 0.5)
+    frame.clusters_below[0].size = 120.0
+    frame.clusters_below[1].size = 105.0
+    frame.clusters_below[2].size = 92.0
+    features = FeatureExtractor().extract(frame)
+
+    plan = HeuristicPlaybookRouter().route(frame, features)
+
+    assert features.cluster_fade_ready is True
+    assert features.double_sweep_ready is True
+    assert plan.playbook == Playbook.DOUBLE_SWEEP
+    assert plan.side == TradeSide.FLAT
 
 
 def test_router_returns_sweep_reclaim_when_reclaim_is_visible() -> None:

@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 from dex_llm.features.extractor import FeatureExtractor
-from dex_llm.llm.prompting import render_router_prompt
+from dex_llm.llm.prompting import build_router_input, render_router_prompt
 from dex_llm.models import MarketFrame
 
 
@@ -23,6 +23,44 @@ def test_router_prompt_includes_heatmap_path_and_kill_switch() -> None:
         template="# Router",
     )
 
-    assert '"heatmap_path": "heatmaps/sample-btc-20260311T150000Z.png"' in prompt
+    assert '"heatmap_path": "heatmaps/sample-eth-20260311T150000Z.png"' in prompt
+    assert '"heatmap_image_path": "heatmaps/sample-eth-20260311T150000Z.png"' in prompt
     assert '"kill_switch": {' in prompt
     assert '"allow_new_trades": false' in prompt
+
+
+def test_router_input_prefers_local_heatmap_image(tmp_path: Path) -> None:
+    frame = load_sample_frame()
+    local_image = tmp_path / "heatmap.png"
+    local_image.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+    frame.heatmap_image_path = str(local_image)
+    frame.heatmap_path = str(local_image)
+
+    payload = build_router_input(
+        frame=frame,
+        features=FeatureExtractor().extract(frame),
+        template="# Router",
+    )
+
+    content = payload[1]["content"]
+    assert isinstance(content, list)
+    assert content[1]["type"] == "input_image"
+    assert str(content[1]["image_url"]).startswith("data:image/png;base64,")
+
+
+def test_router_input_falls_back_to_remote_heatmap_url() -> None:
+    frame = load_sample_frame()
+    frame.heatmap_image_path = None
+    frame.heatmap_image_url = "https://example.com/eth-heatmap.png"
+    frame.heatmap_path = frame.heatmap_image_url
+
+    payload = build_router_input(
+        frame=frame,
+        features=FeatureExtractor().extract(frame),
+        template="# Router",
+    )
+
+    content = payload[1]["content"]
+    assert isinstance(content, list)
+    assert content[1]["type"] == "input_image"
+    assert content[1]["image_url"] == "https://example.com/eth-heatmap.png"

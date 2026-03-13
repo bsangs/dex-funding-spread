@@ -178,10 +178,22 @@ class HeatmapSnapshot(BaseModel):
     captured_at: datetime
     clusters_above: list[Cluster]
     clusters_below: list[Cluster]
+    heatmap_image_url: str | None = None
+    heatmap_image_path: str | None = None
     image_url: str | None = None
     image_path: str | None = None
     raw_path: str | None = None
     metadata: dict[str, object] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def sync_heatmap_image_fields(self) -> HeatmapSnapshot:
+        resolved_url = self.heatmap_image_url or self.image_url
+        resolved_path = self.heatmap_image_path or self.image_path
+        self.heatmap_image_url = resolved_url
+        self.heatmap_image_path = resolved_path
+        self.image_url = resolved_url
+        self.image_path = resolved_path
+        return self
 
 
 class KillSwitchStatus(BaseModel):
@@ -291,22 +303,40 @@ class MarketFrame(BaseModel):
     clusters_below: list[Cluster]
     atr: float = Field(gt=0.0)
     heatmap_path: str | None = None
+    heatmap_image_path: str | None = None
+    heatmap_image_url: str | None = None
     map_quality: MapQuality = MapQuality.CLEAN
     sweep: SweepObservation = Field(default_factory=SweepObservation)
     position: PositionState = Field(default_factory=PositionState)
     kill_switch: KillSwitchStatus = Field(default_factory=KillSwitchStatus)
     metadata: dict[str, object] = Field(default_factory=dict)
 
+    @model_validator(mode="after")
+    def sync_heatmap_fields(self) -> MarketFrame:
+        resolved_path = self.heatmap_image_path
+        resolved_url = self.heatmap_image_url
+        if self.heatmap_path:
+            if self.heatmap_path.startswith("http"):
+                resolved_url = resolved_url or self.heatmap_path
+            else:
+                resolved_path = resolved_path or self.heatmap_path
+        self.heatmap_image_path = resolved_path
+        self.heatmap_image_url = resolved_url
+        self.heatmap_path = self.heatmap_path or resolved_path or resolved_url
+        return self
+
 
 class FeatureSnapshot(BaseModel):
     dominant_cluster_side: ClusterSide | None
     dominant_ratio: float
+    cluster_balance_ratio: float
     closest_above_distance: float | None
     closest_below_distance: float | None
     top_above: Cluster | None
     top_below: Cluster | None
     sweep_reclaim_ready: bool
     double_sweep_ready: bool
+    cluster_fade_ready: bool
     directional_vacuum: bool
     notes: list[str]
 
@@ -358,6 +388,7 @@ class RiskAssessment(BaseModel):
     allowed: bool
     reason: str
     recommended_quantity: float = 0.0
+    resting_order_quantities: list[float] = Field(default_factory=list)
     recommended_notional: float = 0.0
     risk_budget: float = 0.0
 

@@ -28,6 +28,7 @@ from dex_llm.models import (
     PositionState,
     ReconciliationDecision,
     RestingOrderPlan,
+    RiskAssessment,
     TradePlan,
     TradeSide,
 )
@@ -44,6 +45,7 @@ class DesiredOrder:
     order_type: dict[str, object]
     cloid: str
     expires_after: int | None = None
+    stop_reference_price: float | None = None
 
 
 class HyperliquidExchangeExecutor:
@@ -62,6 +64,8 @@ class HyperliquidExchangeExecutor:
         ambiguous_resolver: AmbiguousStateResolver | None = None,
         keep_price_tolerance_bps: float = 2.0,
         keep_size_tolerance_fraction: float = 0.001,
+        margin_mode: MarginMode = MarginMode.ISOLATED,
+        target_leverage: int = 10,
     ) -> None:
         self.wallet = Account.from_key(signer_private_key)
         self.signer_agent_address = signer_agent_address.lower()
@@ -78,6 +82,8 @@ class HyperliquidExchangeExecutor:
         self.ambiguous_resolver = ambiguous_resolver
         self.keep_price_tolerance_bps = keep_price_tolerance_bps
         self.keep_size_tolerance_fraction = keep_size_tolerance_fraction
+        self.margin_mode = margin_mode
+        self.target_leverage = target_leverage
 
     def verify_signer(self) -> None:
         derived = self.wallet.address.lower()
@@ -137,21 +143,29 @@ class HyperliquidExchangeExecutor:
         *,
         symbol: str,
         plan: TradePlan,
-        quantity: float,
+        risk: RiskAssessment,
         frame_timestamp: datetime,
         revision: int,
         strategy_id: str = "dex-llm",
+        quantity_override: float | None = None,
     ) -> list[DesiredOrder]:
         if plan.resting_orders:
             return self.build_orders_from_resting_orders(
                 symbol=symbol,
                 resting_orders=plan.resting_orders,
-                quantity=quantity,
+                quantities=self._resting_quantities(
+                    resting_orders=plan.resting_orders,
+                    risk=risk,
+                    quantity_override=quantity_override,
+                ),
                 frame_timestamp=frame_timestamp,
                 revision=revision,
                 strategy_id=strategy_id,
             )
         if plan.side not in {TradeSide.LONG, TradeSide.SHORT}:
+            return []
+        quantity = self._entry_quantity(risk, quantity_override=quantity_override)
+        if quantity <= 0:
             return []
         entry_price = sum(plan.entry_band) / 2
         entry_side = plan.side
@@ -178,6 +192,7 @@ class HyperliquidExchangeExecutor:
                     revision,
                 ),
                 expires_after=entry_expires_after,
+                stop_reference_price=plan.invalid_if,
             ),
             DesiredOrder(
                 symbol=symbol,
@@ -240,16 +255,22 @@ class HyperliquidExchangeExecutor:
         *,
         symbol: str,
         resting_orders: list[RestingOrderPlan],
-        quantity: float,
+        quantities: list[float],
         frame_timestamp: datetime,
         revision: int,
         strategy_id: str = "dex-llm",
         entry_only: bool = True,
         side_filter: TradeSide | None = None,
     ) -> list[DesiredOrder]:
+        if len(quantities) != len(resting_orders):
+            raise ValueError("resting order quantities must align with resting orders")
         desired_orders: list[DesiredOrder] = []
-        for resting_order in resting_orders:
+        for index, (resting_order, quantity) in enumerate(
+            zip(resting_orders, quantities, strict=False)
+        ):
             if side_filter is not None and resting_order.side != side_filter:
+                continue
+            if quantity <= 0:
                 continue
             if entry_only:
                 desired_orders.append(
@@ -266,9 +287,10 @@ class HyperliquidExchangeExecutor:
                             symbol,
                             frame_timestamp,
                             OrderRole.ENTRY,
-                            revision if resting_order.side == TradeSide.LONG else revision + 1,
+                            revision + index,
                         ),
                         expires_after=None,
+                        stop_reference_price=resting_order.invalid_if,
                     )
                 )
                 continue
@@ -295,7 +317,7 @@ class HyperliquidExchangeExecutor:
                             symbol,
                             frame_timestamp,
                             OrderRole.STOP_LOSS,
-                            revision,
+                            revision + index,
                         ),
                     ),
                     DesiredOrder(
@@ -311,7 +333,7 @@ class HyperliquidExchangeExecutor:
                             symbol,
                             frame_timestamp,
                             OrderRole.TAKE_PROFIT_1,
-                            revision,
+                            revision + index,
                         ),
                     ),
                     DesiredOrder(
@@ -327,7 +349,7 @@ class HyperliquidExchangeExecutor:
                             symbol,
                             frame_timestamp,
                             OrderRole.TAKE_PROFIT_2,
-                            revision,
+                            revision + index,
                         ),
                     ),
                 ]
@@ -338,8 +360,8 @@ class HyperliquidExchangeExecutor:
         self,
         *,
         plan: TradePlan,
+        risk: RiskAssessment,
         symbol: str,
-        quantity: float,
         frame_timestamp: datetime,
         position: PositionState,
         best_bid: float,
@@ -364,20 +386,16 @@ class HyperliquidExchangeExecutor:
         desired_orders = self.build_orders_from_plan(
             symbol=symbol,
             plan=plan,
-            quantity=quantity,
+            risk=risk,
             frame_timestamp=frame_timestamp,
             revision=revision,
         )
         if plan.resting_orders:
-            if position.side == TradeSide.FLAT:
-                desired_orders = [
-                    order for order in desired_orders if order.role == OrderRole.ENTRY
-                ]
-            else:
+            if position.side != TradeSide.FLAT:
                 desired_orders = self.build_orders_from_resting_orders(
                     symbol=symbol,
                     resting_orders=plan.resting_orders,
-                    quantity=position.quantity or quantity,
+                    quantities=[position.quantity for _ in plan.resting_orders],
                     frame_timestamp=frame_timestamp,
                     revision=revision,
                     entry_only=False,
@@ -392,7 +410,7 @@ class HyperliquidExchangeExecutor:
             symbol=symbol,
             desired_orders=desired_orders,
             current_orders=position.active_orders,
-            current_position_size=quantity if position.side != TradeSide.FLAT else 0.0,
+            current_position_size=self._signed_position_size(position),
             best_bid=best_bid,
             best_ask=best_ask,
             oracle_price=oracle_price,
@@ -401,7 +419,7 @@ class HyperliquidExchangeExecutor:
             exit_receipts = self._sync_protection_after_fill(
                 symbol=symbol,
                 plan=plan,
-                quantity=quantity,
+                risk=risk,
                 frame_timestamp=frame_timestamp,
                 revision=revision,
                 receipts=receipts,
@@ -508,6 +526,9 @@ class HyperliquidExchangeExecutor:
             best_bid=best_bid,
             best_ask=best_ask,
             oracle_price=oracle_price,
+            margin_mode=self.margin_mode,
+            target_leverage=self.target_leverage,
+            stop_reference_price=desired.stop_reference_price,
         )
         if not validation.valid:
             return self._receipt(
@@ -574,6 +595,9 @@ class HyperliquidExchangeExecutor:
             best_bid=best_bid,
             best_ask=best_ask,
             oracle_price=oracle_price,
+            margin_mode=self.margin_mode,
+            target_leverage=self.target_leverage,
+            stop_reference_price=desired.stop_reference_price,
         )
         if not validation.valid:
             return self._receipt(
@@ -709,7 +733,7 @@ class HyperliquidExchangeExecutor:
         *,
         symbol: str,
         plan: TradePlan,
-        quantity: float,
+        risk: RiskAssessment,
         frame_timestamp: datetime,
         revision: int,
         receipts: list[ExecutionReceipt],
@@ -730,16 +754,40 @@ class HyperliquidExchangeExecutor:
 
         side_filter = None
         if plan.resting_orders:
+            resting_quantities = self._resting_quantities(
+                resting_orders=plan.resting_orders,
+                risk=risk,
+            )
             desired_map = {
                 order.cloid: order
                 for order in self.build_orders_from_resting_orders(
                     symbol=symbol,
                     resting_orders=plan.resting_orders,
-                    quantity=quantity,
+                    quantities=resting_quantities,
                     frame_timestamp=frame_timestamp,
                     revision=revision,
                 )
             }
+            filled_sides = {
+                desired_map[receipt.cloid].side
+                for receipt in filled_entries
+                if receipt.cloid in desired_map
+            }
+            if len(filled_sides) > 1:
+                return [
+                    self._receipt(
+                        symbol=symbol,
+                        cloid="cluster-fade-safe-fail",
+                        action="safe_fail",
+                        decision=ReconciliationDecision.AWAIT_RESOLUTION,
+                        success=False,
+                        status=OrderState.UNKNOWN,
+                        message=(
+                            "multiple cluster_fade entries filled in one cycle; "
+                            "skip new orders until next sync"
+                        ),
+                    )
+                ]
             for receipt in filled_entries:
                 desired = desired_map.get(receipt.cloid)
                 if desired is not None:
@@ -747,14 +795,24 @@ class HyperliquidExchangeExecutor:
                     break
             if side_filter is None:
                 return []
+            sibling_cancels = self._cancel_opposing_entries(
+                symbol=symbol,
+                receipts=receipts,
+                desired_map=desired_map,
+                keep_side=side_filter,
+            )
             desired_orders = self.build_orders_from_resting_orders(
                 symbol=symbol,
                 resting_orders=plan.resting_orders,
-                quantity=quantity,
+                quantities=resting_quantities,
                 frame_timestamp=frame_timestamp,
                 revision=revision,
                 entry_only=False,
                 side_filter=side_filter,
+            )
+            protection_size = next(
+                (order.size for order in desired_orders if order.role == OrderRole.STOP_LOSS),
+                0.0,
             )
         else:
             if plan.side == TradeSide.FLAT:
@@ -762,21 +820,24 @@ class HyperliquidExchangeExecutor:
             full_orders = self.build_orders_from_plan(
                 symbol=symbol,
                 plan=plan,
-                quantity=quantity,
+                risk=risk,
                 frame_timestamp=frame_timestamp,
                 revision=revision,
             )
             desired_orders = [order for order in full_orders if order.role != OrderRole.ENTRY]
+            sibling_cancels = []
+            protection_size = self._entry_quantity(risk)
 
-        return self.reconcile_orders(
+        protection_receipts = self.reconcile_orders(
             symbol=symbol,
             desired_orders=desired_orders,
             current_orders=current_orders,
-            current_position_size=quantity,
+            current_position_size=self._signed_size(side_filter or plan.side, protection_size),
             best_bid=best_bid,
             best_ask=best_ask,
             oracle_price=oracle_price,
         )
+        return sibling_cancels + protection_receipts
 
     def _set_expires_after(self, expires_after: int | None) -> None:
         self.exchange.set_expires_after(expires_after)
@@ -842,6 +903,72 @@ class HyperliquidExchangeExecutor:
             raw_response=raw_response or {},
             submitted_at=datetime.now(tz=UTC),
         )
+
+    @staticmethod
+    def _entry_quantity(
+        risk: RiskAssessment,
+        *,
+        quantity_override: float | None = None,
+    ) -> float:
+        if quantity_override is not None:
+            return quantity_override
+        return risk.recommended_quantity
+
+    def _resting_quantities(
+        self,
+        *,
+        resting_orders: list[RestingOrderPlan],
+        risk: RiskAssessment,
+        quantity_override: float | None = None,
+    ) -> list[float]:
+        if quantity_override is not None:
+            return [quantity_override for _ in resting_orders]
+        if len(risk.resting_order_quantities) == len(resting_orders):
+            return list(risk.resting_order_quantities)
+        return [risk.recommended_quantity for _ in resting_orders]
+
+    def _cancel_opposing_entries(
+        self,
+        *,
+        symbol: str,
+        receipts: list[ExecutionReceipt],
+        desired_map: Mapping[str, DesiredOrder],
+        keep_side: TradeSide,
+    ) -> list[ExecutionReceipt]:
+        cancellations: list[ExecutionReceipt] = []
+        for receipt in receipts:
+            desired = desired_map.get(receipt.cloid)
+            if desired is None or desired.role != OrderRole.ENTRY or desired.side == keep_side:
+                continue
+            if receipt.status not in {OrderState.OPEN, OrderState.TRIGGERED, OrderState.UNKNOWN}:
+                continue
+            current = LiveOrderState(
+                coin=symbol,
+                side="B" if desired.side == TradeSide.LONG else "A",
+                limit_price=desired.price,
+                size=desired.size,
+                reduce_only=False,
+                is_trigger=False,
+                order_type="limit",
+                oid=receipt.oid or 0,
+                cloid=receipt.cloid,
+                status=receipt.status,
+                role=OrderRole.ENTRY,
+            )
+            cancellations.append(self.cancel_order(symbol, current))
+        return cancellations
+
+    @staticmethod
+    def _signed_position_size(position: PositionState) -> float:
+        return HyperliquidExchangeExecutor._signed_size(position.side, position.quantity)
+
+    @staticmethod
+    def _signed_size(side: TradeSide, quantity: float) -> float:
+        if side == TradeSide.SHORT:
+            return -abs(quantity)
+        if side == TradeSide.LONG:
+            return abs(quantity)
+        return 0.0
 
 
 def _status_from_string(value: str) -> OrderState:

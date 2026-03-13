@@ -5,16 +5,19 @@ from datetime import UTC, datetime, timedelta
 
 from dex_llm.live_frame import LiveFrameBuilder
 from dex_llm.models import (
+    BboSnapshot,
     Candle,
     Cluster,
     ClusterShape,
     ClusterSide,
     HeatmapSnapshot,
+    HyperliquidActiveAssetContext,
     HyperliquidClearinghouseState,
     HyperliquidFrontendOrder,
     HyperliquidMarginSummary,
     HyperliquidPerpPosition,
     HyperliquidUserFill,
+    LiveStateSnapshot,
     MapQuality,
     OrderBookSnapshot,
     PriceLevel,
@@ -168,6 +171,8 @@ def test_live_frame_builder_uses_real_heatmap_when_available() -> None:
     assert frame.map_quality == MapQuality.CLEAN
     assert frame.metadata["heatmap_provider"] == "coinglass"
     assert frame.clusters_above[0].price == 70300.0
+    assert frame.heatmap_image_path is None
+    assert frame.heatmap_image_url is None
     assert frame.kill_switch.allow_new_trades is True
 
 
@@ -349,4 +354,68 @@ def test_live_frame_builder_loads_private_position_state() -> None:
     assert frame.position.open_orders == 2
     assert frame.position.consecutive_losses_today == 1
     assert frame.position.liquidation_price == 65000.0
+    assert frame.kill_switch.allow_new_trades is True
+
+
+def test_live_frame_builder_preserves_heatmap_image_metadata() -> None:
+    builder = LiveFrameBuilder(
+        FakeHyperliquidClient(),
+        FakeHeatmapClient(image_path="data/heatmaps/images/coinglass-eth.png"),
+    )
+
+    frame = builder.build("BTC", allow_synthetic=False)
+
+    assert frame.heatmap_path == "data/heatmaps/images/coinglass-eth.png"
+    assert frame.heatmap_image_path == "data/heatmaps/images/coinglass-eth.png"
+
+
+def test_live_frame_builder_uses_webdata3_and_userevents_for_private_freshness() -> None:
+    now = datetime.now(tz=UTC)
+    snapshot = LiveStateSnapshot(
+        symbol="BTC",
+        order_book=OrderBookSnapshot(
+            symbol="BTC",
+            captured_at=now,
+            best_bid=70100.0,
+            best_ask=70110.0,
+            mid_price=70105.0,
+            bids=[PriceLevel(price=70100.0, size=8.0, orders=12)],
+            asks=[PriceLevel(price=70110.0, size=9.0, orders=14)],
+        ),
+        candles_5m=FakeHyperliquidClient().candles_5m,
+        candles_15m=FakeHyperliquidClient().candles_15m,
+        bbo=BboSnapshot(symbol="BTC", captured_at=now, bid=70100.0, ask=70110.0, mid=70105.0),
+        active_asset_ctx=HyperliquidActiveAssetContext(
+            coin="BTC",
+            mark_price=70105.0,
+            oracle_price=70103.0,
+            mid_price=70105.0,
+            max_leverage=20.0,
+            timestamp=now,
+        ),
+        clearinghouse_state=HyperliquidClearinghouseState(
+            asset_positions=[],
+            cross_margin_summary=HyperliquidMarginSummary(account_value=10_000.0),
+            margin_summary=HyperliquidMarginSummary(account_value=10_000.0),
+            withdrawable=9_500.0,
+            time=now,
+        ),
+        channel_timestamps={
+            "l2Book": now,
+            "candle:5m": now,
+            "candle:15m": now,
+            "bbo": now,
+            "activeAssetCtx": now,
+            "webData2": now - timedelta(seconds=20),
+            "webData3": now,
+            "orderUpdates": now,
+            "userFills": now,
+            "userEvents": now,
+        },
+        channel_snapshot_flags={},
+    )
+    builder = LiveFrameBuilder(FakeHyperliquidClient(), FakeHeatmapClient(captured_at=now))
+
+    frame = builder.build_from_snapshot(snapshot, allow_synthetic=False)
+
     assert frame.kill_switch.allow_new_trades is True

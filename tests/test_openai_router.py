@@ -73,6 +73,41 @@ def test_openai_router_returns_parsed_trade_plan() -> None:
         "reasoning.encrypted_content",
         "web_search_call.action.sources",
     ]
+    assert isinstance(router.client.responses.last_kwargs["input"], list)
+
+
+def test_openai_router_sends_multimodal_input_when_local_heatmap_exists(tmp_path: Path) -> None:
+    frame = load_sample_frame()
+    local_image = tmp_path / "heatmap.png"
+    local_image.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+    frame.heatmap_image_path = str(local_image)
+    frame.heatmap_path = str(local_image)
+    features = FeatureExtractor().extract(frame)
+    plan = TradePlan(
+        playbook=Playbook.MAGNET_FOLLOW,
+        side=TradeSide.LONG,
+        entry_band=(4000.0, 4002.0),
+        invalid_if=3970.0,
+        tp1=4025.0,
+        tp2=4040.0,
+        ttl_min=12,
+        reason="dominant upside liquidity",
+    )
+    client = FakeOpenAIClient([plan])
+    router = OpenAIRouter(
+        client=client,
+        prompt_template="# Router",
+        image_detail="high",
+    )
+
+    routed = router.route(frame, features)
+
+    assert routed == plan
+    assert client.responses.last_kwargs is not None
+    user_content = client.responses.last_kwargs["input"][1]["content"]
+    assert user_content[1]["type"] == "input_image"
+    assert user_content[1]["detail"] == "high"
+    assert str(user_content[1]["image_url"]).startswith("data:image/png;base64,")
 
 
 def test_openai_router_falls_back_on_timeout() -> None:

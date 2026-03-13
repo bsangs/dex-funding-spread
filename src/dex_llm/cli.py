@@ -109,6 +109,7 @@ def _build_router(settings: AppSettings) -> RouterProtocol:
                 for item in settings.openai_include.split(",")
                 if item.strip()
             ],
+            image_detail=settings.openai_image_detail,
         )
     return HeuristicPlaybookRouter()
 
@@ -144,18 +145,32 @@ def _paper_preview(plan: object, risk: object, account: AccountState) -> object:
             {
                 "side": order.side,
                 "entry_price": sum(order.entry_band) / 2,
-                "quantity": getattr(risk, "recommended_quantity", 0.0),
+                "quantity": (
+                    risk.resting_order_quantities[index]
+                    if index < len(risk.resting_order_quantities)
+                    else getattr(risk, "recommended_quantity", 0.0)
+                ),
                 "invalid_if": order.invalid_if,
                 "take_profit_1": order.tp1,
                 "take_profit_2": order.tp2,
                 "ttl_min": order.ttl_min,
                 "leverage": min(
                     account.max_leverage,
-                    getattr(risk, "recommended_notional", 0.0) / account.equity,
+                    (
+                        (
+                            (
+                                risk.resting_order_quantities[index]
+                                if index < len(risk.resting_order_quantities)
+                                else getattr(risk, "recommended_quantity", 0.0)
+                            )
+                            * (sum(order.entry_band) / 2)
+                        )
+                        / account.equity
+                    ),
                 ),
                 "reason": order.reason,
             }
-            for order in resting_orders
+            for index, order in enumerate(resting_orders)
         ]
     return PaperExecutor().build_ticket(plan, risk, account).model_dump(mode="json")
 
@@ -242,6 +257,8 @@ def _build_executor(
     validator = PreSubmitValidator(
         {symbol: asset_meta},
         max_price_deviation_bps=settings.max_price_deviation_bps,
+        min_liquidation_gap_pct=settings.min_liquidation_gap_pct,
+        max_stop_to_liq_fraction=settings.max_stop_to_liq_fraction,
     )
     budgeter = RateLimitBudgeter()
     rate_limit_payload = rest_gateway.user_rate_limit(user_address)
@@ -276,6 +293,8 @@ def _build_executor(
         budgeter=budgeter,
         vault_address=settings.hyperliquid_vault_address,
         ambiguous_resolver=resolver,
+        margin_mode=settings.margin_mode,
+        target_leverage=settings.target_leverage,
     )
 
 
@@ -291,6 +310,8 @@ def inspect(
     risk_policy = RiskPolicy(
         risk_per_trade_pct=settings.risk_per_trade_pct,
         max_consecutive_losses=settings.kill_switch_max_consecutive_losses,
+        cluster_fade_long_weight=settings.cluster_fade_long_weight,
+        cluster_fade_short_weight=settings.cluster_fade_short_weight,
     )
     account = AccountState(
         equity=equity,
@@ -459,6 +480,8 @@ def route_live(
     risk = RiskPolicy(
         risk_per_trade_pct=settings.risk_per_trade_pct,
         max_consecutive_losses=settings.kill_switch_max_consecutive_losses,
+        cluster_fade_long_weight=settings.cluster_fade_long_weight,
+        cluster_fade_short_weight=settings.cluster_fade_short_weight,
     ).assess(plan, account, frame.position, frame.kill_switch)
     console.print_json(
         json.dumps(
@@ -544,6 +567,8 @@ def execute_live(
     risk = RiskPolicy(
         risk_per_trade_pct=settings.risk_per_trade_pct,
         max_consecutive_losses=settings.kill_switch_max_consecutive_losses,
+        cluster_fade_long_weight=settings.cluster_fade_long_weight,
+        cluster_fade_short_weight=settings.cluster_fade_short_weight,
     ).assess(plan, account, frame.position, frame.kill_switch)
     payload: dict[str, object] = {
         "frame": frame.model_dump(mode="json"),
@@ -593,8 +618,8 @@ def execute_live(
             return
         receipts = executor.execute_plan(
             plan=plan,
+            risk=risk,
             symbol=symbol,
-            quantity=risk.recommended_quantity if risk.allowed else frame.position.quantity,
             frame_timestamp=frame.timestamp,
             position=frame.position,
             best_bid=frame.metadata.get("best_bid", frame.current_price),

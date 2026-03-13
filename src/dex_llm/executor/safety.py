@@ -205,11 +205,15 @@ class PreSubmitValidator:
         max_price_deviation_bps: float = 500.0,
         min_notional: float = 10.0,
         leverage_buffer_fraction: float = 0.1,
+        min_liquidation_gap_pct: float = 7.0,
+        max_stop_to_liq_fraction: float = 0.8,
     ) -> None:
         self.asset_metadata = asset_metadata or {}
         self.max_price_deviation_bps = max_price_deviation_bps
         self.min_notional = min_notional
         self.leverage_buffer_fraction = leverage_buffer_fraction
+        self.min_liquidation_gap_pct = min_liquidation_gap_pct
+        self.max_stop_to_liq_fraction = max_stop_to_liq_fraction
 
     def validate(
         self,
@@ -219,6 +223,9 @@ class PreSubmitValidator:
         bbo: Any,
         active_asset_ctx: Any,
         position: Any,
+        margin_mode: MarginMode | None = None,
+        target_leverage: int | None = None,
+        stop_reference_price: float | None = None,
     ) -> ValidationResult:
         side = TradeSide.LONG if getattr(intent, "is_buy", False) else TradeSide.SHORT
         best_bid = getattr(bbo, "bid", None)
@@ -228,17 +235,23 @@ class PreSubmitValidator:
             if active_asset_ctx is not None
             else None
         )
+        current_position_size = getattr(position, "quantity", 0.0) or 0.0
+        if getattr(position, "side", None) == TradeSide.SHORT:
+            current_position_size = -abs(current_position_size)
         result = self.validate_order(
             symbol=intent.symbol,
             side=side,
             price=intent.limit_price,
             size=intent.size,
             reduce_only=getattr(intent, "reduce_only", False),
-            current_position_size=getattr(position, "quantity", 0.0) or 0.0,
+            current_position_size=current_position_size,
             best_bid=best_bid,
             best_ask=best_ask,
             oracle_price=oracle_price,
             asset_meta=asset_meta,
+            margin_mode=margin_mode,
+            target_leverage=target_leverage,
+            stop_reference_price=stop_reference_price,
         )
         if not result.valid:
             return result
@@ -266,6 +279,10 @@ class PreSubmitValidator:
         best_ask: float | None = None,
         oracle_price: float | None = None,
         asset_meta: AssetMetadata | None = None,
+        margin_mode: MarginMode | None = None,
+        target_leverage: int | None = None,
+        stop_reference_price: float | None = None,
+        current_liquidation_price: float | None = None,
     ) -> ValidationResult:
         meta = asset_meta or self.asset_metadata.get(symbol)
         if meta is None:
@@ -298,6 +315,20 @@ class PreSubmitValidator:
                     valid=False,
                     reason=f"price deviates {deviation_bps:.0f} bps from oracle/mid",
                 )
+
+        if not reduce_only:
+            liquidation_check = self._validate_liquidation_buffer(
+                side=side,
+                entry_price=quantized_price,
+                size=quantized_size,
+                stop_reference_price=stop_reference_price,
+                margin_mode=margin_mode,
+                target_leverage=target_leverage,
+                asset_meta=meta,
+                current_liquidation_price=current_liquidation_price,
+            )
+            if liquidation_check is not None:
+                return liquidation_check
 
         return ValidationResult(
             valid=True,
@@ -367,6 +398,95 @@ class PreSubmitValidator:
         if best_bid is None or best_ask is None:
             return None
         return (best_bid + best_ask) / 2
+
+    def _validate_liquidation_buffer(
+        self,
+        *,
+        side: TradeSide,
+        entry_price: float,
+        size: float,
+        stop_reference_price: float | None,
+        margin_mode: MarginMode | None,
+        target_leverage: int | None,
+        asset_meta: AssetMetadata,
+        current_liquidation_price: float | None,
+    ) -> ValidationResult | None:
+        if stop_reference_price is None or margin_mode is None or target_leverage is None:
+            return None
+        if margin_mode == MarginMode.CROSS:
+            if current_liquidation_price is None:
+                return ValidationResult(
+                    valid=False,
+                    reason="cross-mode entry blocked until exchange liquidation price is available",
+                )
+            return ValidationResult(
+                valid=False,
+                reason="cross-mode liquidation buffer validation is fail-closed in v1",
+            )
+        liquidation_price = self.estimate_isolated_liquidation_price(
+            side=side,
+            entry_price=entry_price,
+            size=size,
+            target_leverage=target_leverage,
+            asset_meta=asset_meta,
+        )
+        if liquidation_price is None:
+            return ValidationResult(
+                valid=False,
+                reason="unable to estimate isolated liquidation price",
+            )
+        liquidation_gap = abs(entry_price - liquidation_price)
+        if liquidation_gap <= 0:
+            return ValidationResult(valid=False, reason="invalid liquidation buffer")
+        liquidation_gap_pct = (liquidation_gap / entry_price) * 100
+        if liquidation_gap_pct < self.min_liquidation_gap_pct:
+            return ValidationResult(
+                valid=False,
+                reason=(
+                    "estimated liquidation buffer too small "
+                    f"({liquidation_gap_pct:.2f}% < {self.min_liquidation_gap_pct:.2f}%)"
+                ),
+            )
+        stop_distance = abs(entry_price - stop_reference_price)
+        if stop_distance > liquidation_gap * self.max_stop_to_liq_fraction:
+            return ValidationResult(
+                valid=False,
+                reason=(
+                    "stop distance consumes too much liquidation buffer "
+                    f"({stop_distance:.2f} > {self.max_stop_to_liq_fraction:.2f} * "
+                    f"{liquidation_gap:.2f})"
+                ),
+            )
+        return None
+
+    def estimate_isolated_liquidation_price(
+        self,
+        *,
+        side: TradeSide,
+        entry_price: float,
+        size: float,
+        target_leverage: int,
+        asset_meta: AssetMetadata,
+    ) -> float | None:
+        if asset_meta.max_leverage is None or asset_meta.max_leverage <= 0:
+            return None
+        if target_leverage <= 0 or size <= 0:
+            return None
+        maintenance_margin_fraction = 1 / (asset_meta.max_leverage * 2)
+        isolated_margin = (entry_price * size) / target_leverage
+        maintenance_margin = entry_price * size * maintenance_margin_fraction
+        margin_available = isolated_margin - maintenance_margin
+        if margin_available <= 0:
+            return None
+        side_sign = 1 if side == TradeSide.LONG else -1
+        denominator = 1 - (maintenance_margin_fraction * side_sign)
+        if math.isclose(denominator, 0.0, rel_tol=0.0, abs_tol=1e-9):
+            return None
+        adjustment = side_sign * (margin_available / size) / denominator
+        liquidation_price = entry_price - adjustment
+        if liquidation_price <= 0:
+            return None
+        return liquidation_price
 
 
 class AmbiguousStateResolver:

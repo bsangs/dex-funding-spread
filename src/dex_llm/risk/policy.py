@@ -17,10 +17,18 @@ class RiskPolicy:
         risk_per_trade_pct: float = 0.35,
         max_consecutive_losses: int = 2,
         notional_buffer_fraction: float = 0.35,
+        cluster_fade_long_weight: float = 0.8,
+        cluster_fade_short_weight: float = 0.3,
     ) -> None:
         self.risk_per_trade_pct = risk_per_trade_pct
         self.max_consecutive_losses = max_consecutive_losses
         self.notional_buffer_fraction = notional_buffer_fraction
+        if cluster_fade_long_weight <= 0 or cluster_fade_short_weight <= 0:
+            raise ValueError("cluster_fade side weights must be positive")
+        self.cluster_fade_weights = {
+            TradeSide.LONG: cluster_fade_long_weight,
+            TradeSide.SHORT: cluster_fade_short_weight,
+        }
 
     def assess(
         self,
@@ -105,24 +113,39 @@ class RiskPolicy:
         if not stop_distances or min(stop_distances) <= 0:
             return RiskAssessment(allowed=False, reason="invalid stop distance")
 
-        worst_stop_distance = max(stop_distances)
-        max_mid_entry = max(sum(order.entry_band) / 2 for order in plan.resting_orders)
         risk_budget = account.equity * (self.risk_per_trade_pct / 100)
-        quantity = risk_budget / worst_stop_distance
+        total_weight = sum(self.cluster_fade_weights[order.side] for order in plan.resting_orders)
+        if total_weight <= 0:
+            return RiskAssessment(allowed=False, reason="invalid cluster fade side weights")
+
+        quantities: list[float] = []
+        notionals: list[float] = []
+        for order in plan.resting_orders:
+            weight = self.cluster_fade_weights[order.side]
+            allocated_budget = risk_budget * (weight / total_weight)
+            mid_entry = sum(order.entry_band) / 2
+            stop_distance = abs(mid_entry - order.invalid_if)
+            quantity = allocated_budget / stop_distance
+            quantities.append(quantity)
+            notionals.append(quantity * mid_entry)
+
+        total_notional = sum(notionals)
         max_notional = (
             account.available_margin * account.max_leverage * self.notional_buffer_fraction
         )
-        notional = quantity * max_mid_entry
-        if notional > max_notional:
-            quantity = max_notional / max_mid_entry
-            notional = max_notional
-        if quantity <= 0:
+        if total_notional > max_notional:
+            scale = max_notional / total_notional
+            quantities = [quantity * scale for quantity in quantities]
+            notionals = [notional * scale for notional in notionals]
+            total_notional = max_notional
+        if not quantities or min(quantities) <= 0:
             return RiskAssessment(allowed=False, reason="no margin available")
 
         return RiskAssessment(
             allowed=True,
             reason="risk checks passed for resting cluster fade orders",
-            recommended_quantity=quantity,
-            recommended_notional=notional,
+            recommended_quantity=max(quantities),
+            resting_order_quantities=quantities,
+            recommended_notional=total_notional,
             risk_budget=risk_budget,
         )
