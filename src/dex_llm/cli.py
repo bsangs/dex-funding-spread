@@ -27,7 +27,7 @@ from dex_llm.integrations.hyperliquid_live import HyperliquidRestGateway, Hyperl
 from dex_llm.live_frame import LiveFrameBuilder
 from dex_llm.llm.openai_router import OpenAIRouter
 from dex_llm.llm.prompting import load_prompt_template, render_router_prompt
-from dex_llm.llm.router import HeuristicPlaybookRouter, RouterProtocol
+from dex_llm.llm.router import RouterProtocol
 from dex_llm.models import AccountState, ExecutionMode, LiveStateSnapshot, MarketFrame, TradeSide
 from dex_llm.replay.session import ReplaySession
 from dex_llm.risk.kill_switch import KillSwitchPolicy
@@ -90,25 +90,27 @@ def _build_heatmap_client(settings: AppSettings) -> object | None:
 
 
 def _build_router(settings: AppSettings) -> RouterProtocol:
-    if settings.llm_provider == "openai" and settings.openai_api_key:
-        return OpenAIRouter(
-            api_key=settings.openai_api_key,
-            model=settings.llm_model,
-            entry_prompt_path=settings.entry_prompt_path,
-            position_prompt_path=settings.position_prompt_path,
-            timeout_s=settings.llm_timeout_s,
-            verbosity=settings.openai_verbosity,
-            reasoning_effort=settings.openai_reasoning_effort,
-            reasoning_summary=settings.openai_reasoning_summary,
-            store=settings.openai_store,
-            include=[
-                item.strip()
-                for item in settings.openai_include.split(",")
-                if item.strip()
-            ],
-            image_detail=settings.openai_image_detail,
-        )
-    return HeuristicPlaybookRouter()
+    if settings.llm_provider != "openai":
+        raise RuntimeError(f"unsupported llm_provider: {settings.llm_provider}")
+    if not settings.openai_api_key:
+        raise RuntimeError("DEX_LLM_OPENAI_API_KEY is required")
+    return OpenAIRouter(
+        api_key=settings.openai_api_key,
+        model=settings.llm_model,
+        entry_prompt_path=settings.entry_prompt_path,
+        position_prompt_path=settings.position_prompt_path,
+        timeout_s=settings.llm_timeout_s,
+        verbosity=settings.openai_verbosity,
+        reasoning_effort=settings.openai_reasoning_effort,
+        reasoning_summary=settings.openai_reasoning_summary,
+        store=settings.openai_store,
+        include=[
+            item.strip()
+            for item in settings.openai_include.split(",")
+            if item.strip()
+        ],
+        image_detail=settings.openai_image_detail,
+    )
 
 
 def _build_account_state(
@@ -366,7 +368,7 @@ def inspect(
     settings = AppSettings()
     frame = _load_frame(frame_path)
     extractor = FeatureExtractor()
-    router = HeuristicPlaybookRouter()
+    router = _build_router(settings)
     risk_policy = RiskPolicy(
         long_notional_fraction=settings.long_notional_fraction,
         short_notional_fraction=settings.short_notional_fraction,
@@ -424,8 +426,9 @@ def record_sample(
 def replay(
     source: Path = DEFAULT_REPLAY_ARGUMENT,
 ) -> None:
+    settings = AppSettings()
     session = ReplaySession(JsonlFrameStore(source).read_all())
-    outputs = session.route_all(FeatureExtractor(), HeuristicPlaybookRouter())
+    outputs = session.route_all(FeatureExtractor(), _build_router(settings))
     console.print_json(
         json.dumps(
             [

@@ -3,16 +3,16 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from openai import APITimeoutError
 
 from dex_llm.features.extractor import FeatureExtractor
-from dex_llm.llm.openai_router import OpenAIRouter
-from dex_llm.llm.router import HeuristicPlaybookRouter
+from dex_llm.llm.openai_router import OpenAIRouter, OpenAITradePlan
 from dex_llm.models import MarketFrame, Playbook, TradePlan, TradeSide
 
 
 class FakeParsedResponse:
-    def __init__(self, plan: TradePlan | None) -> None:
+    def __init__(self, plan: OpenAITradePlan | None) -> None:
         self.output_parsed = plan
 
 
@@ -54,7 +54,7 @@ def test_openai_router_returns_parsed_trade_plan() -> None:
         reason="dominant upside liquidity",
     )
     router = OpenAIRouter(
-        client=FakeOpenAIClient([plan]),
+        client=FakeOpenAIClient([_wire_plan(plan)]),
         prompt_template="# Router",
     )
 
@@ -63,7 +63,7 @@ def test_openai_router_returns_parsed_trade_plan() -> None:
     assert routed == plan
     assert router.client.responses.last_kwargs is not None
     assert router.client.responses.last_kwargs["model"] == "gpt-5.4"
-    assert router.client.responses.last_kwargs["verbosity"] == "medium"
+    assert router.client.responses.last_kwargs["text"] == {"verbosity": "medium"}
     assert router.client.responses.last_kwargs["store"] is True
     assert router.client.responses.last_kwargs["reasoning"] == {
         "effort": "medium",
@@ -74,6 +74,39 @@ def test_openai_router_returns_parsed_trade_plan() -> None:
         "web_search_call.action.sources",
     ]
     assert isinstance(router.client.responses.last_kwargs["input"], list)
+
+
+def test_openai_router_extracts_nested_parsed_trade_plan() -> None:
+    plan = _wire_plan(
+        TradePlan(
+            playbook=Playbook.NO_TRADE,
+            side=TradeSide.FLAT,
+            entry_band=(0.0, 0.0),
+            invalid_if=0.0,
+            tp1=0.0,
+            tp2=0.0,
+            ttl_min=15,
+            reason="hold",
+        )
+    )
+
+    class NestedContent:
+        def __init__(self, parsed: OpenAITradePlan) -> None:
+            self.parsed = parsed
+
+    class NestedMessage:
+        def __init__(self, parsed: OpenAITradePlan) -> None:
+            self.content = [NestedContent(parsed)]
+
+    class NestedResponse:
+        output_parsed = None
+
+        def __init__(self, parsed: OpenAITradePlan) -> None:
+            self.output = [NestedMessage(parsed)]
+
+    extracted = OpenAIRouter._extract_trade_plan(NestedResponse(plan))
+
+    assert extracted == plan
 
 
 def test_openai_router_sends_multimodal_input_when_local_heatmap_exists(tmp_path: Path) -> None:
@@ -95,7 +128,7 @@ def test_openai_router_sends_multimodal_input_when_local_heatmap_exists(tmp_path
     )
     client = FakeOpenAIClient([plan])
     router = OpenAIRouter(
-        client=client,
+        client=FakeOpenAIClient([_wire_plan(plan)]),
         prompt_template="# Router",
         image_detail="high",
     )
@@ -103,26 +136,23 @@ def test_openai_router_sends_multimodal_input_when_local_heatmap_exists(tmp_path
     routed = router.route(frame, features)
 
     assert routed == plan
-    assert client.responses.last_kwargs is not None
-    user_content = client.responses.last_kwargs["input"][1]["content"]
+    assert router.client.responses.last_kwargs is not None
+    user_content = router.client.responses.last_kwargs["input"][1]["content"]
     assert user_content[1]["type"] == "input_image"
     assert user_content[1]["detail"] == "high"
     assert str(user_content[1]["image_url"]).startswith("data:image/png;base64,")
 
 
-def test_openai_router_falls_back_on_timeout() -> None:
+def test_openai_router_raises_on_timeout() -> None:
     frame = load_sample_frame()
     features = FeatureExtractor().extract(frame)
-    fallback = HeuristicPlaybookRouter()
     router = OpenAIRouter(
         client=FakeOpenAIClient([APITimeoutError(request=None)] * 2),
         prompt_template="# Router",
-        fallback_router=fallback,
     )
 
-    routed = router.route(frame, features)
-
-    assert routed.playbook == fallback.route(frame, features).playbook
+    with pytest.raises(RuntimeError, match="OpenAI router failed"):
+        router.route(frame, features)
 
 
 def test_openai_router_skips_call_when_kill_switch_is_active() -> None:
@@ -157,7 +187,7 @@ def test_openai_router_accepts_custom_response_settings() -> None:
     )
     client = FakeOpenAIClient([plan])
     router = OpenAIRouter(
-        client=client,
+        client=FakeOpenAIClient([_wire_plan(plan)]),
         prompt_template="# Router",
         verbosity="high",
         reasoning_effort="high",
@@ -169,11 +199,27 @@ def test_openai_router_accepts_custom_response_settings() -> None:
     routed = router.route(frame, features)
 
     assert routed == plan
-    assert client.responses.last_kwargs is not None
-    assert client.responses.last_kwargs["verbosity"] == "high"
-    assert client.responses.last_kwargs["reasoning"] == {
+    assert router.client.responses.last_kwargs is not None
+    assert router.client.responses.last_kwargs["text"] == {"verbosity": "high"}
+    assert router.client.responses.last_kwargs["reasoning"] == {
         "effort": "high",
         "summary": "detailed",
     }
-    assert client.responses.last_kwargs["store"] is False
-    assert client.responses.last_kwargs["include"] == ["reasoning.encrypted_content"]
+    assert router.client.responses.last_kwargs["store"] is False
+    assert router.client.responses.last_kwargs["include"] == ["reasoning.encrypted_content"]
+
+
+def _wire_plan(plan: TradePlan) -> OpenAITradePlan:
+    return OpenAITradePlan(
+        playbook=plan.playbook,
+        side=plan.side,
+        entry_band=list(plan.entry_band),
+        invalid_if=plan.invalid_if,
+        tp1=plan.tp1,
+        tp2=plan.tp2,
+        ttl_min=plan.ttl_min,
+        reason=plan.reason,
+        touch_confidence=plan.touch_confidence,
+        expected_touch_minutes=plan.expected_touch_minutes,
+        resting_orders=[],
+    )

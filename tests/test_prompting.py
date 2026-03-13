@@ -46,7 +46,8 @@ def test_router_input_prefers_local_heatmap_image(tmp_path: Path) -> None:
     assert isinstance(content, list)
     assert content[1]["type"] == "input_image"
     assert str(content[1]["image_url"]).startswith("data:image/png;base64,")
-    assert "지정가 구간" in str(content[0]["text"])
+    assert "다음 10~30분 가격 경로" in str(content[0]["text"])
+    assert "즉시 체결될 자리가 없다는 이유만으로 no_trade" in str(content[0]["text"])
     structured_context = str(content[2]["text"])
     assert '"current_price"' not in structured_context
     assert '"position"' not in structured_context

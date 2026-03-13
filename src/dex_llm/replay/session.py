@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from dex_llm.features.extractor import FeatureExtractor
-from dex_llm.llm.router import HeuristicPlaybookRouter
+from dex_llm.llm.router import RouterProtocol
 from dex_llm.models import FeatureSnapshot, MarketFrame, TradePlan
 
 
@@ -14,7 +14,7 @@ class ReplaySession:
     def route_all(
         self,
         extractor: FeatureExtractor,
-        router: HeuristicPlaybookRouter,
+        router: RouterProtocol,
     ) -> list[tuple[MarketFrame, FeatureSnapshot, TradePlan]]:
         outputs: list[tuple[MarketFrame, FeatureSnapshot, TradePlan]] = []
         for frame in self.frames:
@@ -22,4 +22,3 @@ class ReplaySession:
             plan = router.route(frame, features)
             outputs.append((frame, features, plan))
         return outputs
-
