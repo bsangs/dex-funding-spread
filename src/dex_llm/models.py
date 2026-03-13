@@ -341,6 +341,43 @@ class FeatureSnapshot(BaseModel):
     notes: list[str]
 
 
+def _validate_trade_levels(
+    *,
+    label: str,
+    side: TradeSide,
+    entry_band: tuple[float, float],
+    invalid_if: float,
+    tp1: float,
+    tp2: float,
+) -> None:
+    if side == TradeSide.FLAT:
+        return
+
+    band_low, band_high = entry_band
+    if band_low <= 0 or band_high <= 0:
+        raise ValueError(f"{label} entry_band must be positive for an actionable trade")
+
+    if invalid_if <= 0 or tp1 <= 0 or tp2 <= 0:
+        raise ValueError(f"{label} requires stop loss and both take-profit targets")
+
+    mid_entry = (band_low + band_high) / 2
+    if side == TradeSide.LONG:
+        if invalid_if >= mid_entry:
+            raise ValueError(f"{label} stop loss must sit below the entry band")
+        if tp1 <= mid_entry or tp2 <= mid_entry:
+            raise ValueError(f"{label} take-profit targets must sit above the entry band")
+        if tp2 < tp1:
+            raise ValueError(f"{label} tp2 must be at or above tp1 for long trades")
+        return
+
+    if invalid_if <= mid_entry:
+        raise ValueError(f"{label} stop loss must sit above the entry band")
+    if tp1 >= mid_entry or tp2 >= mid_entry:
+        raise ValueError(f"{label} take-profit targets must sit below the entry band")
+    if tp2 > tp1:
+        raise ValueError(f"{label} tp2 must be at or below tp1 for short trades")
+
+
 class RestingOrderPlan(BaseModel):
     side: TradeSide
     entry_band: tuple[float, float]
@@ -359,6 +396,14 @@ class RestingOrderPlan(BaseModel):
             raise ValueError("resting order entry_band must be ascending")
         if self.side == TradeSide.FLAT:
             raise ValueError("resting order side must be long or short")
+        _validate_trade_levels(
+            label="resting order",
+            side=self.side,
+            entry_band=self.entry_band,
+            invalid_if=self.invalid_if,
+            tp1=self.tp1,
+            tp2=self.tp2,
+        )
         return self
 
 
@@ -379,6 +424,17 @@ class TradePlan(BaseModel):
     def validate_band(self) -> TradePlan:
         if self.entry_band[0] > self.entry_band[1]:
             raise ValueError("entry_band must be ascending")
+        if len(self.resting_orders) > 1:
+            raise ValueError("single-position mode allows at most one resting order")
+        if self.side != TradeSide.FLAT:
+            _validate_trade_levels(
+                label="trade plan",
+                side=self.side,
+                entry_band=self.entry_band,
+                invalid_if=self.invalid_if,
+                tp1=self.tp1,
+                tp2=self.tp2,
+            )
         return self
 
 

@@ -6,7 +6,7 @@ from dex_llm.executor.paper import PaperBroker
 from dex_llm.models import Playbook, RestingOrderPlan, RiskAssessment, TradePlan, TradeSide
 
 
-def test_paper_broker_fills_one_resting_entry_and_cancels_sibling() -> None:
+def test_paper_broker_fills_single_resting_entry() -> None:
     broker = PaperBroker()
     plan = TradePlan(
         playbook=Playbook.CLUSTER_FADE,
@@ -16,7 +16,7 @@ def test_paper_broker_fills_one_resting_entry_and_cancels_sibling() -> None:
         tp1=0.0,
         tp2=0.0,
         ttl_min=30,
-        reason="rest both sides",
+        reason="rest one side",
         resting_orders=[
             RestingOrderPlan(
                 side=TradeSide.LONG,
@@ -25,16 +25,7 @@ def test_paper_broker_fills_one_resting_entry_and_cancels_sibling() -> None:
                 tp1=2110.0,
                 tp2=2120.0,
                 ttl_min=30,
-                reason="lower long fade",
-            ),
-            RestingOrderPlan(
-                side=TradeSide.SHORT,
-                entry_band=(2120.0, 2122.0),
-                invalid_if=2128.0,
-                tp1=2110.0,
-                tp2=2100.0,
-                ttl_min=30,
-                reason="upper short fade",
+                reason="single long fade",
             ),
         ],
     )
@@ -42,8 +33,8 @@ def test_paper_broker_fills_one_resting_entry_and_cancels_sibling() -> None:
         allowed=True,
         reason="ok",
         recommended_quantity=0.1,
-        resting_order_quantities=[0.1, 0.05],
-        recommended_notional=300.0,
+        resting_order_quantities=[0.1],
+        recommended_notional=210.0,
         risk_budget=10.0,
     )
 
@@ -53,7 +44,7 @@ def test_paper_broker_fills_one_resting_entry_and_cancels_sibling() -> None:
         risk=risk,
         frame_timestamp=datetime(2026, 3, 13, 0, 0, tzinfo=UTC),
     )
-    assert len(receipts) == 2
+    assert len(receipts) == 1
 
     fill_receipts = broker.mark_market(
         symbol="ETH",
@@ -68,7 +59,6 @@ def test_paper_broker_fills_one_resting_entry_and_cancels_sibling() -> None:
     assert broker.position.quantity == 0.1
     assert broker.pending_entries == []
     assert any(receipt.action == "paper_fill_entry" for receipt in fill_receipts)
-    assert any(receipt.action == "paper_cancel" for receipt in fill_receipts)
 
 
 def test_paper_broker_tracks_total_trade_pnl_across_tp1_and_tp2() -> None:

@@ -41,10 +41,9 @@ def test_router_returns_cluster_fade_only_when_clusters_are_balanced() -> None:
 
     assert features.cluster_fade_ready is True
     assert plan.playbook == Playbook.CLUSTER_FADE
-    assert plan.side == TradeSide.FLAT
-    assert len(plan.resting_orders) == 2
-    assert {order.side for order in plan.resting_orders} == {TradeSide.LONG, TradeSide.SHORT}
-    assert all(order.touch_confidence > 0.5 for order in plan.resting_orders)
+    assert plan.side == TradeSide.SHORT
+    assert plan.resting_orders == []
+    assert plan.touch_confidence > 0.5
 
 
 def test_router_prefers_double_sweep_before_cluster_fade() -> None:
@@ -64,7 +63,7 @@ def test_router_prefers_double_sweep_before_cluster_fade() -> None:
 
     assert features.cluster_fade_ready is True
     assert features.double_sweep_ready is True
-    assert plan.playbook == Playbook.DOUBLE_SWEEP
+    assert plan.playbook == Playbook.NO_TRADE
     assert plan.side == TradeSide.FLAT
 
 

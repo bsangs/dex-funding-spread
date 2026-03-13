@@ -7,9 +7,6 @@ from dex_llm.models import (
     AccountState,
     FeatureSnapshot,
     HyperliquidUserFill,
-    LiveOrderState,
-    OrderRole,
-    OrderState,
     Playbook,
     PositionState,
     RestingOrderPlan,
@@ -63,7 +60,7 @@ def test_bot_runtime_expires_directional_entries_after_ttl() -> None:
     assert "expired" in effective.reason
 
 
-def test_bot_runtime_keeps_only_non_invalidated_resting_orders() -> None:
+def test_bot_runtime_invalidates_single_resting_order() -> None:
     runtime = object.__new__(BotRuntime)
     plan = TradePlan(
         playbook=Playbook.CLUSTER_FADE,
@@ -73,7 +70,7 @@ def test_bot_runtime_keeps_only_non_invalidated_resting_orders() -> None:
         tp1=0.0,
         tp2=0.0,
         ttl_min=30,
-        reason="rest both sides",
+        reason="rest one side",
         resting_orders=[
             RestingOrderPlan(
                 side=TradeSide.LONG,
@@ -83,15 +80,6 @@ def test_bot_runtime_keeps_only_non_invalidated_resting_orders() -> None:
                 tp2=2110.0,
                 ttl_min=30,
                 reason="long wall",
-            ),
-            RestingOrderPlan(
-                side=TradeSide.SHORT,
-                entry_band=(2120.0, 2122.0),
-                invalid_if=2128.0,
-                tp1=2110.0,
-                tp2=2100.0,
-                ttl_min=30,
-                reason="short wall",
             ),
         ],
     )
@@ -123,9 +111,8 @@ def test_bot_runtime_keeps_only_non_invalidated_resting_orders() -> None:
         now=datetime.now(tz=UTC),
     )
 
-    assert effective.playbook == Playbook.CLUSTER_FADE
-    assert len(effective.resting_orders) == 1
-    assert effective.resting_orders[0].side == TradeSide.SHORT
+    assert effective.playbook == Playbook.NO_TRADE
+    assert "invalidated" in effective.reason
 
 
 def test_bot_runtime_expires_resting_order_when_touch_window_passes() -> None:
@@ -257,7 +244,7 @@ def test_bot_runtime_raises_when_live_leverage_preflight_is_invalid() -> None:
         raise AssertionError("expected leverage preflight failure to raise")
 
 
-def test_bot_runtime_refreshes_when_entry_order_state_changes() -> None:
+def test_bot_runtime_only_refreshes_after_strategy_interval() -> None:
     runtime = object.__new__(BotRuntime)
     runtime._strategy_state = StrategyState(
         frame=None,  # type: ignore[arg-type]
@@ -289,43 +276,10 @@ def test_bot_runtime_refreshes_when_entry_order_state_changes() -> None:
         updated_at=datetime.now(tz=UTC),
     )
     runtime.strategy_interval_s = 300
-    runtime._previous_strategy_signature = (
-        TradeSide.FLAT,
-        0.0,
-        0,
-        (),
-        False,
-        None,
-    )
-    position = PositionState(
-        side=TradeSide.FLAT,
-        open_orders=1,
-        active_orders=[
-            LiveOrderState(
-                coin="ETH",
-                side="B",
-                limit_price=2100.0,
-                size=0.1,
-                reduce_only=False,
-                is_trigger=False,
-                order_type="limit",
-                oid=1,
-                cloid="entry-1",
-                status=OrderState.OPEN,
-                role=OrderRole.ENTRY,
-            )
-        ],
-    )
-    signature = runtime._strategy_refresh_signature(position=position, fills=[])
-
-    assert runtime._should_refresh_strategy(
-        now=datetime.now(tz=UTC),
-        position=position,
-        refresh_signature=signature,
-    )
+    assert runtime._should_refresh_strategy(now=datetime.now(tz=UTC)) is False
 
 
-def test_bot_runtime_refreshes_when_fill_state_changes() -> None:
+def test_bot_runtime_refreshes_after_strategy_interval() -> None:
     runtime = object.__new__(BotRuntime)
     runtime._strategy_state = StrategyState(
         frame=None,  # type: ignore[arg-type]
@@ -354,16 +308,44 @@ def test_bot_runtime_refreshes_when_fill_state_changes() -> None:
             reason="idle",
         ),
         risk=RiskAssessment(allowed=False, reason="idle"),
-        updated_at=datetime.now(tz=UTC),
+        updated_at=datetime.now(tz=UTC) - timedelta(minutes=6),
     )
     runtime.strategy_interval_s = 300
-    runtime._previous_strategy_signature = (
-        TradeSide.FLAT,
-        0.0,
-        0,
-        (),
-        False,
-        None,
+    assert runtime._should_refresh_strategy(now=datetime.now(tz=UTC)) is True
+
+
+def test_bot_runtime_waits_for_next_review_after_recent_fill() -> None:
+    runtime = object.__new__(BotRuntime)
+    updated_at = datetime.now(tz=UTC) - timedelta(minutes=1)
+    plan = TradePlan(
+        playbook=Playbook.MAGNET_FOLLOW,
+        side=TradeSide.LONG,
+        entry_band=(2100.0, 2102.0),
+        invalid_if=2090.0,
+        tp1=2110.0,
+        tp2=2120.0,
+        ttl_min=20,
+        reason="follow upside liquidity",
+    )
+    state = StrategyState(
+        frame=None,  # type: ignore[arg-type]
+        features=FeatureSnapshot(
+            dominant_cluster_side=None,
+            dominant_ratio=1.0,
+            cluster_balance_ratio=1.0,
+            closest_above_distance=None,
+            closest_below_distance=None,
+            top_above=None,
+            top_below=None,
+            sweep_reclaim_ready=False,
+            double_sweep_ready=False,
+            cluster_fade_ready=False,
+            directional_vacuum=False,
+            notes=[],
+        ),
+        plan=plan,
+        risk=RiskAssessment(allowed=True, reason="ok"),
+        updated_at=updated_at,
     )
     fill = HyperliquidUserFill(
         coin="ETH",
@@ -375,13 +357,13 @@ def test_bot_runtime_refreshes_when_fill_state_changes() -> None:
         oid=2,
         fill_hash="fill-1",
     )
-    signature = runtime._strategy_refresh_signature(
+    effective = runtime._effective_plan(
+        strategy_state=state,
         position=PositionState(),
+        current_price=2101.0,
+        now=datetime.now(tz=UTC),
         fills=[fill],
     )
 
-    assert runtime._should_refresh_strategy(
-        now=datetime.now(tz=UTC),
-        position=PositionState(),
-        refresh_signature=signature,
-    )
+    assert effective.playbook == Playbook.NO_TRADE
+    assert "recent fill" in effective.reason

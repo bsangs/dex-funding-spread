@@ -163,6 +163,38 @@ class PaperBroker:
         self.pending_entries = updated_entries
         return receipts
 
+    def close_position_market(
+        self,
+        *,
+        symbol: str,
+        price: float,
+        now: datetime,
+        reason: str,
+    ) -> ExecutionReceipt:
+        if self.position is None:
+            return self._receipt(
+                symbol=symbol,
+                action="paper_hold",
+                cloid="paper-position",
+                decision=ReconciliationDecision.KEEP,
+                status=OrderState.UNKNOWN,
+                message="no paper position to close",
+            )
+        pnl = self._close_position(
+            self.position,
+            quantity=self.position.quantity,
+            price=price,
+            now=now,
+        )
+        return self._receipt(
+            symbol=symbol,
+            action="paper_close",
+            cloid="paper-position",
+            decision=ReconciliationDecision.CANCEL_PLACE,
+            status=OrderState.FILLED,
+            message=f"paper position closed by strategy review ({pnl:.2f}); {reason}",
+        )
+
     def mark_market(
         self,
         *,

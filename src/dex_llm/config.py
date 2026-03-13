@@ -34,7 +34,8 @@ class AppSettings(BaseSettings):
     coinglass_heatmap_path: str = "/api/futures/liquidation/aggregated-heatmap/model1"
     coinglass_web_url: str = "https://www.coinglass.com/ko/liquidations"
     coinglass_use_playwright_fallback: bool = True
-    prompt_path: Path = Path("prompts/playbook_router.md")
+    entry_prompt_path: Path = Path("prompts/entry_router_ko.md")
+    position_prompt_path: Path = Path("prompts/position_router_ko.md")
     raw_data_dir: Path = Path("data/raw")
     replay_dir: Path = Path("data/replays")
     heatmap_cache_dir: Path = Path("data/heatmaps")
@@ -46,17 +47,14 @@ class AppSettings(BaseSettings):
     kill_switch_max_private_latency_ms: float = 1_500.0
     kill_switch_max_data_age_ms: float = 15_000.0
     kill_switch_max_consecutive_losses: int = 2
-    risk_per_trade_pct: float = 0.35
-    cluster_fade_long_weight: float = 0.8
-    cluster_fade_short_weight: float = 0.3
+    long_notional_fraction: float = 1.0
+    short_notional_fraction: float = 0.4
     execution_mode: ExecutionMode = ExecutionMode.PAPER
     margin_mode: MarginMode = MarginMode.ISOLATED
     target_leverage: int = 10
     base_leverage: float = 6.0
     max_leverage: float = 10.0
     max_price_deviation_bps: float = 500.0
-    min_liquidation_gap_pct: float = 3.0
-    max_stop_to_liq_fraction: float = 1.2
     openai_image_detail: str = "auto"
     clock_drift_limit_ms: float = 500.0
 

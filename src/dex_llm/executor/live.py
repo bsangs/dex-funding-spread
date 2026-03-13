@@ -26,6 +26,7 @@ from dex_llm.models import (
     OrderRole,
     OrderState,
     PendingActionState,
+    Playbook,
     PositionState,
     ReconciliationDecision,
     RestingOrderPlan,
@@ -389,6 +390,41 @@ class HyperliquidExchangeExecutor:
                     success=False,
                     status=OrderState.UNKNOWN,
                     message="rate-limit budget degraded; new entries suspended",
+                )
+            ]
+
+        if plan.playbook == Playbook.NO_TRADE:
+            signed_position_size = self._signed_position_size(position)
+            receipts = self.reconcile_orders(
+                symbol=symbol,
+                desired_orders=[],
+                current_orders=position.active_orders,
+                current_position_size=signed_position_size,
+                best_bid=best_bid,
+                best_ask=best_ask,
+                oracle_price=oracle_price,
+            )
+            if position.side != TradeSide.FLAT:
+                receipts.append(
+                    self.close_position(
+                        symbol=symbol,
+                        signed_position_size=signed_position_size,
+                        reason=plan.reason,
+                    )
+                )
+            return receipts
+
+        protection_error = self._protection_plan_error(plan)
+        if protection_error is not None:
+            return [
+                self._receipt(
+                    symbol=symbol,
+                    cloid="invalid-protection-plan",
+                    action="plan_guard",
+                    decision=ReconciliationDecision.AWAIT_RESOLUTION,
+                    success=False,
+                    status=OrderState.REJECTED,
+                    message=protection_error,
                 )
             ]
 
@@ -846,7 +882,198 @@ class HyperliquidExchangeExecutor:
             best_ask=best_ask,
             oracle_price=oracle_price,
         )
-        return sibling_cancels + protection_receipts
+        combined_receipts = sibling_cancels + protection_receipts
+        if desired_orders and not self._protection_orders_secured(
+            desired_orders=desired_orders,
+            current_orders=current_orders,
+            receipts=protection_receipts,
+        ):
+            signed_position_size = self._signed_size(side_filter or plan.side, protection_size)
+            combined_receipts.append(
+                self._emergency_close_position(
+                    symbol=symbol,
+                    signed_position_size=signed_position_size,
+                    reason="filled entry was not fully protected; fail closed",
+                )
+            )
+        return combined_receipts
+
+    @staticmethod
+    def _protection_plan_error(plan: TradePlan) -> str | None:
+        if plan.resting_orders:
+            if len(plan.resting_orders) > 1:
+                return "single-position mode allows at most one pending entry"
+            for index, order in enumerate(plan.resting_orders, start=1):
+                error = HyperliquidExchangeExecutor._protection_level_error(
+                    side=order.side,
+                    entry_band=order.entry_band,
+                    invalid_if=order.invalid_if,
+                    tp1=order.tp1,
+                    tp2=order.tp2,
+                )
+                if error is not None:
+                    return f"resting order {index} is missing valid TP/SL protection: {error}"
+            return None
+
+        if plan.side == TradeSide.FLAT:
+            return None
+
+        error = HyperliquidExchangeExecutor._protection_level_error(
+            side=plan.side,
+            entry_band=plan.entry_band,
+            invalid_if=plan.invalid_if,
+            tp1=plan.tp1,
+            tp2=plan.tp2,
+        )
+        if error is None:
+            return None
+        return f"actionable trade plan is missing valid TP/SL protection: {error}"
+
+    @staticmethod
+    def _protection_level_error(
+        *,
+        side: TradeSide,
+        entry_band: tuple[float, float],
+        invalid_if: float,
+        tp1: float,
+        tp2: float,
+    ) -> str | None:
+        if side == TradeSide.FLAT:
+            return None
+
+        band_low, band_high = entry_band
+        if band_low <= 0 or band_high <= 0:
+            return "entry band must be positive"
+        if invalid_if <= 0 or tp1 <= 0 or tp2 <= 0:
+            return "stop loss and both take-profit targets must be positive"
+
+        mid_entry = (band_low + band_high) / 2
+        if side == TradeSide.LONG:
+            if invalid_if >= mid_entry:
+                return "stop loss must sit below the entry band"
+            if tp1 <= mid_entry or tp2 <= mid_entry:
+                return "take-profit targets must sit above the entry band"
+            if tp2 < tp1:
+                return "tp2 must be at or above tp1"
+            return None
+
+        if invalid_if <= mid_entry:
+            return "stop loss must sit above the entry band"
+        if tp1 >= mid_entry or tp2 >= mid_entry:
+            return "take-profit targets must sit below the entry band"
+        if tp2 > tp1:
+            return "tp2 must be at or below tp1"
+        return None
+
+    def _protection_orders_secured(
+        self,
+        *,
+        desired_orders: list[DesiredOrder],
+        current_orders: Iterable[LiveOrderState],
+        receipts: list[ExecutionReceipt],
+    ) -> bool:
+        current_by_key = {
+            self._order_key(order.role, self._trade_side_from_order(order)): order
+            for order in current_orders
+            if order.coin
+        }
+        for desired in desired_orders:
+            current = current_by_key.get(self._order_key(desired.role, desired.side))
+            if current is None:
+                if not self._has_successful_receipt(
+                    receipts,
+                    cloid=desired.cloid,
+                    decisions={ReconciliationDecision.PLACE},
+                ):
+                    return False
+                continue
+
+            if self._can_keep(current, desired):
+                if not self._has_successful_receipt(
+                    receipts,
+                    cloid=current.cloid or desired.cloid,
+                    decisions={ReconciliationDecision.KEEP},
+                ):
+                    return False
+                continue
+
+            if self._can_modify(current, desired):
+                if not self._has_successful_receipt(
+                    receipts,
+                    cloid=desired.cloid,
+                    decisions={ReconciliationDecision.MODIFY},
+                ):
+                    return False
+                continue
+
+            if not self._has_successful_receipt(
+                receipts,
+                cloid=desired.cloid,
+                decisions={ReconciliationDecision.PLACE},
+            ):
+                return False
+        return True
+
+    @staticmethod
+    def _has_successful_receipt(
+        receipts: list[ExecutionReceipt],
+        *,
+        cloid: str,
+        decisions: set[ReconciliationDecision],
+    ) -> bool:
+        terminal_failures = {OrderState.REJECTED, OrderState.UNKNOWN, OrderState.CANCELED}
+        return any(
+            receipt.cloid == cloid
+            and receipt.decision in decisions
+            and receipt.success
+            and receipt.status not in terminal_failures
+            for receipt in receipts
+        )
+
+    def _emergency_close_position(
+        self,
+        *,
+        symbol: str,
+        signed_position_size: float,
+        reason: str,
+    ) -> ExecutionReceipt:
+        if signed_position_size == 0:
+            return self._receipt(
+                symbol=symbol,
+                cloid="emergency-close-skipped",
+                action="emergency_close",
+                decision=ReconciliationDecision.AWAIT_RESOLUTION,
+                success=False,
+                status=OrderState.UNKNOWN,
+                message=reason,
+            )
+
+        try:
+            self.nonce_manager.next_nonce()
+            response = self.exchange.market_close(symbol, sz=abs(signed_position_size))
+            receipt = self._receipt_from_response(
+                symbol=symbol,
+                cloid="emergency-close",
+                action="emergency_close",
+                decision=ReconciliationDecision.CANCEL_PLACE,
+                response=response,
+            )
+            return receipt.model_copy(update={"message": reason})
+        except Exception as exc:
+            return self._resolve_or_fail(symbol, "emergency-close", "emergency_close", exc)
+
+    def close_position(
+        self,
+        *,
+        symbol: str,
+        signed_position_size: float,
+        reason: str,
+    ) -> ExecutionReceipt:
+        return self._emergency_close_position(
+            symbol=symbol,
+            signed_position_size=signed_position_size,
+            reason=reason,
+        )
 
     def _set_expires_after(self, expires_after: int | None) -> None:
         self.exchange.set_expires_after(expires_after)

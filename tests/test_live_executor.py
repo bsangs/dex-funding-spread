@@ -3,6 +3,9 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
+
 from dex_llm.cli import _build_executor
 from dex_llm.config import AppSettings
 from dex_llm.executor.live import DesiredOrder, HyperliquidExchangeExecutor
@@ -37,6 +40,7 @@ class FakeExchange:
         self.modified: list[dict[str, object]] = []
         self.ordered: list[dict[str, object]] = []
         self.canceled: list[tuple[str, object]] = []
+        self.market_closed: list[dict[str, object]] = []
         self.expires_after: int | None = None
         self.isolated_margin_updates: list[dict[str, object]] = []
 
@@ -119,6 +123,27 @@ class FakeExchange:
     def cancel(self, symbol: str, oid: int) -> dict[str, object]:
         self.canceled.append((symbol, oid))
         return {"status": "ok", "response": {"status": "canceled"}}
+
+    def market_close(
+        self,
+        coin: str,
+        sz: float | None = None,
+        px: float | None = None,
+        slippage: float = 0.05,
+        cloid: object | None = None,
+        builder: object | None = None,
+    ) -> dict[str, object]:
+        self.market_closed.append(
+            {
+                "coin": coin,
+                "sz": sz,
+                "px": px,
+                "slippage": slippage,
+                "cloid": cloid,
+                "builder": builder,
+            }
+        )
+        return {"status": "ok", "response": {"status": "filled", "oid": 999}}
 
 
 class FilledEntryExchange(FakeExchange):
@@ -223,7 +248,21 @@ def test_pre_submit_validator_quantizes_and_blocks_bad_reduce_only() -> None:
     assert "reduce-only" in bad_result.reason
 
 
-def test_pre_submit_validator_blocks_cross_entries_without_liquidation_guard() -> None:
+def test_trade_plan_requires_tp_sl_for_actionable_entries() -> None:
+    with pytest.raises(ValidationError):
+        TradePlan(
+            playbook=Playbook.MAGNET_FOLLOW,
+            side=TradeSide.LONG,
+            entry_band=(69990.0, 70010.0),
+            invalid_if=69850.0,
+            tp1=0.0,
+            tp2=0.0,
+            ttl_min=20,
+            reason="missing exits",
+        )
+
+
+def test_pre_submit_validator_allows_cross_entries_without_liquidation_guard() -> None:
     validator = PreSubmitValidator(
         {"ETH": AssetMetadata(symbol="ETH", asset_index=0, size_decimals=3, max_leverage=20.0)}
     )
@@ -241,15 +280,12 @@ def test_pre_submit_validator_blocks_cross_entries_without_liquidation_guard() -
         stop_reference_price=3970.0,
     )
 
-    assert result.valid is False
-    assert "cross-mode" in result.reason
+    assert result.valid is True
 
 
-def test_pre_submit_validator_blocks_when_stop_is_too_close_to_liquidation() -> None:
+def test_pre_submit_validator_ignores_liquidation_buffer_constraints() -> None:
     validator = PreSubmitValidator(
-        {"ETH": AssetMetadata(symbol="ETH", asset_index=0, size_decimals=3, max_leverage=20.0)},
-        min_liquidation_gap_pct=7.0,
-        max_stop_to_liq_fraction=0.8,
+        {"ETH": AssetMetadata(symbol="ETH", asset_index=0, size_decimals=3, max_leverage=20.0)}
     )
 
     result = validator.validate_order(
@@ -265,8 +301,7 @@ def test_pre_submit_validator_blocks_when_stop_is_too_close_to_liquidation() -> 
         stop_reference_price=3740.0,
     )
 
-    assert result.valid is False
-    assert "liquidation buffer" in result.reason
+    assert result.valid is True
 
 
 def test_rate_limit_budgeter_soft_degrades_on_pressure() -> None:
@@ -607,7 +642,7 @@ def test_exchange_executor_replaces_orders_outside_keep_tolerance() -> None:
     assert exchange.modified
 
 
-def test_execute_plan_places_protection_after_filled_cluster_fade_entry() -> None:
+def test_execute_plan_places_protection_after_filled_single_resting_entry() -> None:
     exchange = FilledEntryExchange()
     validator = PreSubmitValidator(
         {"BTC": AssetMetadata(symbol="BTC", asset_index=0, size_decimals=3, max_leverage=20.0)}
@@ -629,7 +664,7 @@ def test_execute_plan_places_protection_after_filled_cluster_fade_entry() -> Non
         tp1=0.0,
         tp2=0.0,
         ttl_min=30,
-        reason="arm both bands",
+        reason="arm one band",
         resting_orders=[
             RestingOrderPlan(
                 side=TradeSide.LONG,
@@ -640,15 +675,6 @@ def test_execute_plan_places_protection_after_filled_cluster_fade_entry() -> Non
                 ttl_min=30,
                 reason="lower long fade",
             ),
-            RestingOrderPlan(
-                side=TradeSide.SHORT,
-                entry_band=(70590.0, 70610.0),
-                invalid_if=70750.0,
-                tp1=70450.0,
-                tp2=70350.0,
-                ttl_min=30,
-                reason="upper short fade",
-            ),
         ],
     )
 
@@ -658,8 +684,59 @@ def test_execute_plan_places_protection_after_filled_cluster_fade_entry() -> Non
             allowed=True,
             reason="risk checks passed",
             recommended_quantity=0.12,
-            resting_order_quantities=[0.12, 0.05],
-            recommended_notional=1193.0,
+            resting_order_quantities=[0.12],
+            recommended_notional=840.0,
+            risk_budget=840.0,
+        ),
+        symbol="BTC",
+        frame_timestamp=datetime(2026, 3, 13, 0, 0, tzinfo=UTC),
+        position=PositionState(),
+        best_bid=70000.0,
+        best_ask=70010.0,
+        oracle_price=70005.0,
+    )
+
+    assert len(exchange.ordered) == 4
+    assert receipts[0].status == OrderState.FILLED
+    assert exchange.ordered[0]["sz"] == 0.12
+    assert sum(1 for receipt in receipts if receipt.action == "place") >= 3
+
+
+def test_execute_plan_rejects_invalid_tp_sl_plan_even_if_validation_is_bypassed() -> None:
+    exchange = FakeExchange()
+    validator = PreSubmitValidator(
+        {"BTC": AssetMetadata(symbol="BTC", asset_index=0, size_decimals=3, max_leverage=20.0)}
+    )
+    executor = HyperliquidExchangeExecutor(
+        base_url="https://api.hyperliquid.xyz",
+        signer_private_key="0x59c6995e998f97a5a0044966f094538b2924c92f6e7e0c0c7f3d4e3cbb0dbe4a",
+        signer_agent_address="0x0000000000000000000000000000000000000000",
+        trading_user_address="0x1111111111111111111111111111111111111111",
+        validator=validator,
+        nonce_manager=NonceManager("0xsigner", now_ms=lambda: 1_000),
+        exchange_client=exchange,
+    )
+    plan = TradePlan.model_construct(
+        playbook=Playbook.MAGNET_FOLLOW,
+        side=TradeSide.LONG,
+        entry_band=(69990.0, 70010.0),
+        invalid_if=69850.0,
+        tp1=0.0,
+        tp2=0.0,
+        ttl_min=20,
+        reason="invalid exits",
+        touch_confidence=0.6,
+        expected_touch_minutes=20,
+        resting_orders=[],
+    )
+
+    receipts = executor.execute_plan(
+        plan=plan,
+        risk=RiskAssessment(
+            allowed=True,
+            reason="risk checks passed",
+            recommended_quantity=0.1,
+            recommended_notional=700.0,
             risk_budget=35.0,
         ),
         symbol="BTC",
@@ -670,13 +747,62 @@ def test_execute_plan_places_protection_after_filled_cluster_fade_entry() -> Non
         oracle_price=70005.0,
     )
 
-    assert len(exchange.ordered) == 5
-    assert receipts[0].status == OrderState.FILLED
-    assert any(receipt.action == "cancel" for receipt in receipts)
-    assert exchange.canceled
-    assert exchange.ordered[0]["sz"] == 0.12
-    assert exchange.ordered[1]["sz"] == 0.05
-    assert sum(1 for receipt in receipts if receipt.action == "place") >= 4
+    assert len(receipts) == 1
+    assert receipts[0].action == "plan_guard"
+    assert receipts[0].status == OrderState.REJECTED
+    assert "TP/SL protection" in receipts[0].message
+    assert not exchange.ordered
+
+
+def test_execute_plan_fail_closes_when_protection_order_cannot_be_placed_after_fill() -> None:
+    exchange = FilledEntryExchange()
+    validator = PreSubmitValidator(
+        {"BTC": AssetMetadata(symbol="BTC", asset_index=0, size_decimals=3, max_leverage=20.0)},
+        max_price_deviation_bps=500.0,
+    )
+    executor = HyperliquidExchangeExecutor(
+        base_url="https://api.hyperliquid.xyz",
+        signer_private_key="0x59c6995e998f97a5a0044966f094538b2924c92f6e7e0c0c7f3d4e3cbb0dbe4a",
+        signer_agent_address="0x0000000000000000000000000000000000000000",
+        trading_user_address="0x1111111111111111111111111111111111111111",
+        validator=validator,
+        nonce_manager=NonceManager("0xsigner", now_ms=lambda: 1_000),
+        exchange_client=exchange,
+    )
+    plan = TradePlan(
+        playbook=Playbook.MAGNET_FOLLOW,
+        side=TradeSide.LONG,
+        entry_band=(69990.0, 70010.0),
+        invalid_if=69850.0,
+        tp1=70300.0,
+        tp2=75000.0,
+        ttl_min=20,
+        reason="tp2 is too far and should fail validation after the fill",
+        touch_confidence=0.7,
+        expected_touch_minutes=20,
+    )
+
+    receipts = executor.execute_plan(
+        plan=plan,
+        risk=RiskAssessment(
+            allowed=True,
+            reason="risk checks passed",
+            recommended_quantity=0.12,
+            recommended_notional=840.0,
+            risk_budget=35.0,
+        ),
+        symbol="BTC",
+        frame_timestamp=datetime(2026, 3, 13, 0, 0, tzinfo=UTC),
+        position=PositionState(),
+        best_bid=70000.0,
+        best_ask=70010.0,
+        oracle_price=70005.0,
+    )
+
+    assert exchange.market_closed
+    assert exchange.market_closed[0]["coin"] == "BTC"
+    assert exchange.market_closed[0]["sz"] == pytest.approx(0.12)
+    assert any(receipt.action == "emergency_close" for receipt in receipts)
 
 
 def test_exchange_executor_skips_dead_man_switch_for_resting_entries() -> None:

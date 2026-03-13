@@ -5,6 +5,7 @@ from dex_llm.models import (
     KillSwitchStatus,
     Playbook,
     PositionState,
+    RestingOrderPlan,
     RiskAssessment,
     TradePlan,
     TradeSide,
@@ -14,21 +15,21 @@ from dex_llm.models import (
 class RiskPolicy:
     def __init__(
         self,
-        risk_per_trade_pct: float = 0.35,
         max_consecutive_losses: int = 2,
-        notional_buffer_fraction: float = 0.35,
-        cluster_fade_long_weight: float = 0.8,
-        cluster_fade_short_weight: float = 0.3,
+        long_notional_fraction: float = 1.0,
+        short_notional_fraction: float = 0.4,
+        target_leverage: int = 10,
     ) -> None:
-        self.risk_per_trade_pct = risk_per_trade_pct
+        if long_notional_fraction <= 0 or short_notional_fraction <= 0:
+            raise ValueError("side notional fractions must be positive")
+        if target_leverage <= 0:
+            raise ValueError("target leverage must be positive")
         self.max_consecutive_losses = max_consecutive_losses
-        self.notional_buffer_fraction = notional_buffer_fraction
-        if cluster_fade_long_weight <= 0 or cluster_fade_short_weight <= 0:
-            raise ValueError("cluster_fade side weights must be positive")
-        self.cluster_fade_weights = {
-            TradeSide.LONG: cluster_fade_long_weight,
-            TradeSide.SHORT: cluster_fade_short_weight,
+        self.side_notional_fraction = {
+            TradeSide.LONG: long_notional_fraction,
+            TradeSide.SHORT: short_notional_fraction,
         }
+        self.target_leverage = target_leverage
 
     def assess(
         self,
@@ -37,18 +38,16 @@ class RiskPolicy:
         position: PositionState,
         kill_switch: KillSwitchStatus | None = None,
     ) -> RiskAssessment:
-        if kill_switch is not None and not kill_switch.allow_new_trades:
+        if (
+            kill_switch is not None
+            and not kill_switch.allow_new_trades
+            and position.side == TradeSide.FLAT
+        ):
             reason = kill_switch.reasons[0] if kill_switch.reasons else "kill switch active"
             return RiskAssessment(allowed=False, reason=reason)
 
-        if plan.resting_orders:
-            return self._assess_resting_orders(plan, account, position)
-
-        if (
-            plan.playbook in {Playbook.NO_TRADE, Playbook.DOUBLE_SWEEP}
-            or plan.side == TradeSide.FLAT
-        ):
-            return RiskAssessment(allowed=False, reason="playbook is observational only")
+        if plan.playbook == Playbook.NO_TRADE or plan.side == TradeSide.FLAT:
+            return RiskAssessment(allowed=False, reason="plan requests hold/close only")
 
         has_pending_entry = any(not order.reduce_only for order in position.active_orders)
         if position.entries_blocked_reduce_only or has_pending_entry:
@@ -58,94 +57,52 @@ class RiskPolicy:
             )
 
         if position.side != TradeSide.FLAT or position.quantity > 0:
-            return RiskAssessment(allowed=False, reason="averaging down is disabled")
+            return RiskAssessment(
+                allowed=False,
+                reason="single-position mode blocks averaging down",
+            )
 
         if position.consecutive_losses_today >= self.max_consecutive_losses:
             return RiskAssessment(allowed=False, reason="daily loss streak limit reached")
 
-        mid_entry = sum(plan.entry_band) / 2
-        stop_distance = abs(mid_entry - plan.invalid_if)
-        if stop_distance <= 0:
-            return RiskAssessment(allowed=False, reason="invalid stop distance")
+        order = self._target_order(plan)
+        if order is None:
+            return RiskAssessment(allowed=False, reason="plan does not contain an actionable entry")
 
-        risk_budget = account.equity * (self.risk_per_trade_pct / 100)
-        quantity = risk_budget / stop_distance
-        max_notional = (
-            account.available_margin * account.max_leverage * self.notional_buffer_fraction
-        )
-        notional = quantity * mid_entry
-        if notional > max_notional:
-            quantity = max_notional / mid_entry
-            notional = max_notional
-
-        if quantity <= 0:
+        quantity, notional = self._size_order(order=order, account=account)
+        if quantity <= 0 or notional <= 0:
             return RiskAssessment(allowed=False, reason="no margin available")
 
-        return RiskAssessment(
+        assessment = RiskAssessment(
             allowed=True,
-            reason="risk checks passed",
+            reason="side-based sizing checks passed",
             recommended_quantity=quantity,
             recommended_notional=notional,
-            risk_budget=risk_budget,
+            risk_budget=notional,
         )
+        if plan.resting_orders:
+            assessment.resting_order_quantities = [quantity]
+        return assessment
 
-    def _assess_resting_orders(
+    @staticmethod
+    def _target_order(plan: TradePlan) -> RestingOrderPlan | TradePlan | None:
+        if not plan.resting_orders:
+            return plan
+        if len(plan.resting_orders) != 1:
+            return None
+        return plan.resting_orders[0]
+
+    def _size_order(
         self,
-        plan: TradePlan,
+        *,
+        order: RestingOrderPlan | TradePlan,
         account: AccountState,
-        position: PositionState,
-    ) -> RiskAssessment:
-        has_pending_entry = any(not order.reduce_only for order in position.active_orders)
-        if position.entries_blocked_reduce_only or has_pending_entry:
-            return RiskAssessment(
-                allowed=False,
-                reason="entry workflow already exists; reconcile live orders first",
-            )
-        if position.side != TradeSide.FLAT or position.quantity > 0:
-            return RiskAssessment(allowed=False, reason="averaging down is disabled")
-        if position.consecutive_losses_today >= self.max_consecutive_losses:
-            return RiskAssessment(allowed=False, reason="daily loss streak limit reached")
-
-        stop_distances = [
-            abs((sum(order.entry_band) / 2) - order.invalid_if)
-            for order in plan.resting_orders
-        ]
-        if not stop_distances or min(stop_distances) <= 0:
-            return RiskAssessment(allowed=False, reason="invalid stop distance")
-
-        risk_budget = account.equity * (self.risk_per_trade_pct / 100)
-        total_weight = sum(self.cluster_fade_weights[order.side] for order in plan.resting_orders)
-        if total_weight <= 0:
-            return RiskAssessment(allowed=False, reason="invalid cluster fade side weights")
-
-        quantities: list[float] = []
-        notionals: list[float] = []
-        for order in plan.resting_orders:
-            weight = self.cluster_fade_weights[order.side]
-            allocated_budget = risk_budget * (weight / total_weight)
-            mid_entry = sum(order.entry_band) / 2
-            stop_distance = abs(mid_entry - order.invalid_if)
-            quantity = allocated_budget / stop_distance
-            quantities.append(quantity)
-            notionals.append(quantity * mid_entry)
-
-        total_notional = sum(notionals)
-        max_notional = (
-            account.available_margin * account.max_leverage * self.notional_buffer_fraction
-        )
-        if total_notional > max_notional:
-            scale = max_notional / total_notional
-            quantities = [quantity * scale for quantity in quantities]
-            notionals = [notional * scale for notional in notionals]
-            total_notional = max_notional
-        if not quantities or min(quantities) <= 0:
-            return RiskAssessment(allowed=False, reason="no margin available")
-
-        return RiskAssessment(
-            allowed=True,
-            reason="risk checks passed for resting cluster fade orders",
-            recommended_quantity=max(quantities),
-            resting_order_quantities=quantities,
-            recommended_notional=total_notional,
-            risk_budget=risk_budget,
-        )
+    ) -> tuple[float, float]:
+        entry_price = sum(order.entry_band) / 2
+        if entry_price <= 0:
+            return 0.0, 0.0
+        leverage = min(account.max_leverage, float(self.target_leverage))
+        notional = account.available_margin * leverage * self.side_notional_fraction[order.side]
+        if notional <= 0:
+            return 0.0, 0.0
+        return notional / entry_price, notional

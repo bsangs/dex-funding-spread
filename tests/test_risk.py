@@ -10,7 +10,6 @@ from dex_llm.models import (
     MarketFrame,
     Playbook,
     PositionState,
-    RestingOrderPlan,
     TradePlan,
     TradeSide,
 )
@@ -30,7 +29,7 @@ def test_risk_policy_sizes_allowed_trade() -> None:
 
     assert assessment.allowed is True
     assert assessment.recommended_quantity > 0
-    assert "risk checks passed" in assessment.reason
+    assert "side-based sizing checks passed" in assessment.reason
 
 
 def test_risk_policy_blocks_after_two_losses() -> None:
@@ -58,41 +57,34 @@ def test_risk_policy_blocks_when_kill_switch_is_active() -> None:
     assert "private account state unavailable" in assessment.reason
 
 
-def test_risk_policy_allocates_asymmetric_cluster_fade_quantities() -> None:
+def test_risk_policy_allocates_more_notional_to_longs_than_shorts() -> None:
     account = AccountState(equity=10_000.0, available_margin=10_000.0, max_leverage=10.0)
-    plan = TradePlan(
-        playbook=Playbook.CLUSTER_FADE,
-        side=TradeSide.FLAT,
-        entry_band=(0.0, 0.0),
-        invalid_if=0.0,
-        tp1=0.0,
-        tp2=0.0,
+    long_plan = TradePlan(
+        playbook=Playbook.MAGNET_FOLLOW,
+        side=TradeSide.LONG,
+        entry_band=(3998.0, 4002.0),
+        invalid_if=3970.0,
+        tp1=4025.0,
+        tp2=4040.0,
         ttl_min=30,
-        reason="arm both bands",
-        resting_orders=[
-            RestingOrderPlan(
-                side=TradeSide.LONG,
-                entry_band=(3998.0, 4002.0),
-                invalid_if=3970.0,
-                tp1=4025.0,
-                tp2=4040.0,
-                ttl_min=30,
-                reason="lower long fade",
-            ),
-            RestingOrderPlan(
-                side=TradeSide.SHORT,
-                entry_band=(4048.0, 4052.0),
-                invalid_if=4075.0,
-                tp1=4025.0,
-                tp2=4010.0,
-                ttl_min=30,
-                reason="upper short fade",
-            ),
-        ],
+        reason="long entry",
+    )
+    short_plan = TradePlan(
+        playbook=Playbook.MAGNET_FOLLOW,
+        side=TradeSide.SHORT,
+        entry_band=(4048.0, 4052.0),
+        invalid_if=4075.0,
+        tp1=4025.0,
+        tp2=4010.0,
+        ttl_min=30,
+        reason="short entry",
     )
 
-    assessment = RiskPolicy().assess(plan, account, PositionState(), None)
+    long_assessment = RiskPolicy().assess(long_plan, account, PositionState(), None)
+    short_assessment = RiskPolicy().assess(short_plan, account, PositionState(), None)
 
-    assert assessment.allowed is True
-    assert len(assessment.resting_order_quantities) == 2
-    assert assessment.resting_order_quantities[0] > assessment.resting_order_quantities[1]
+    assert long_assessment.allowed is True
+    assert short_assessment.allowed is True
+    assert long_assessment.recommended_notional == 100_000.0
+    assert short_assessment.recommended_notional == 40_000.0
+    assert long_assessment.recommended_quantity > short_assessment.recommended_quantity

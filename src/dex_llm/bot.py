@@ -81,7 +81,6 @@ class BotRuntime:
         self.console = console or Console()
         self.paper_broker = PaperBroker()
         self._strategy_state: StrategyState | None = None
-        self._previous_strategy_signature: tuple[object, ...] | None = None
 
     def run(self, *, max_cycles: int | None = None) -> None:
         cycle = 0
@@ -96,14 +95,8 @@ class BotRuntime:
                 if not self.live:
                     pre_strategy_receipts = self._paper_mark_market(snapshot, cycle_started)
                 position = self._position_state(snapshot, fills)
-                refresh_signature = self._strategy_refresh_signature(
-                    position=position,
-                    fills=fills or snapshot.recent_fills,
-                )
                 refresh_strategy = self._should_refresh_strategy(
                     now=cycle_started,
-                    position=position,
-                    refresh_signature=refresh_signature,
                 )
                 if refresh_strategy:
                     self._strategy_state = self._compute_strategy_state(snapshot, fills, position)
@@ -116,6 +109,7 @@ class BotRuntime:
                     position=position,
                     current_price=snapshot.order_book.mid_price,
                     now=cycle_started,
+                    fills=fills or snapshot.recent_fills,
                 )
                 account = self._account_from_snapshot(snapshot)
                 kill_switch = self._kill_switch_from_snapshot(
@@ -156,7 +150,6 @@ class BotRuntime:
                     strategy_refreshed=refresh_strategy,
                     meta=meta,
                 )
-                self._previous_strategy_signature = refresh_signature
                 if max_cycles is not None and cycle >= max_cycles:
                     break
                 sleep_for = self.sync_interval_s - (
@@ -240,7 +233,11 @@ class BotRuntime:
         )
         frame = frame.model_copy(update={"position": position})
         features = FeatureExtractor().extract(frame)
-        plan = self.router.route(frame, features)
+        plan = self.router.route(
+            frame,
+            features,
+            previous_plan=self._strategy_state.plan if self._strategy_state is not None else None,
+        )
         account = self._account_from_snapshot(snapshot)
         risk = self.risk_policy.assess(plan, account, position, frame.kill_switch)
         return StrategyState(
@@ -255,52 +252,12 @@ class BotRuntime:
         self,
         *,
         now: datetime,
-        position: PositionState,
-        refresh_signature: tuple[object, ...],
     ) -> bool:
         if self._strategy_state is None:
             return True
         if (now - self._strategy_state.updated_at).total_seconds() >= self.strategy_interval_s:
             return True
-        return self._previous_strategy_signature != refresh_signature
-
-    @staticmethod
-    def _strategy_refresh_signature(
-        *,
-        position: PositionState,
-        fills: list[object],
-    ) -> tuple[object, ...]:
-        entry_orders = tuple(
-            sorted(
-                (
-                    order.coin,
-                    order.side,
-                    round(order.limit_price, 6),
-                    round(order.size, 8),
-                    order.reduce_only,
-                    order.cloid,
-                    order.oid,
-                )
-                for order in position.active_orders
-                if not order.reduce_only
-            )
-        )
-        fill_tail = None
-        if fills:
-            last_fill = fills[-1]
-            fill_tail = (
-                getattr(last_fill, "fill_hash", None),
-                getattr(last_fill, "oid", None),
-                getattr(last_fill, "time", None),
-            )
-        return (
-            position.side,
-            round(position.quantity, 8),
-            position.open_orders,
-            entry_orders,
-            position.entries_blocked_reduce_only,
-            fill_tail,
-        )
+        return False
 
     def _effective_plan(
         self,
@@ -309,12 +266,17 @@ class BotRuntime:
         position: PositionState,
         current_price: float,
         now: datetime,
+        fills: list[object] | None = None,
     ) -> TradePlan:
         plan = strategy_state.plan
         if position.side != TradeSide.FLAT:
+            if plan.side not in {position.side, TradeSide.FLAT}:
+                return self._flat_plan("position review flipped side; close instead of reversing")
             return plan
         if plan.playbook.value == "no_trade":
             return plan
+        if self._has_recent_fill_since(strategy_state.updated_at, fills):
+            return self._flat_plan("recent fill detected; wait for next 5m strategy review")
         if plan.resting_orders:
             active_resting_orders = [
                 order
@@ -355,6 +317,14 @@ class BotRuntime:
         frame_timestamp = snapshot.captured_at or datetime.now(tz=UTC)
 
         if not self.live:
+            if plan.playbook == Playbook.NO_TRADE and self.paper_broker.position is not None:
+                receipt = self.paper_broker.close_position_market(
+                    symbol=self.symbol,
+                    price=snapshot.order_book.mid_price,
+                    now=frame_timestamp,
+                    reason=plan.reason,
+                )
+                return [receipt.model_dump(mode="json")], None
             receipts = self.paper_broker.sync_plan(
                 symbol=self.symbol,
                 plan=plan,
@@ -363,16 +333,25 @@ class BotRuntime:
             )
             return [receipt.model_dump(mode="json") for receipt in receipts], None
 
-        if plan.playbook.value == "no_trade" and position.side == TradeSide.FLAT:
+        if plan.playbook == Playbook.NO_TRADE:
+            signed_position_size = self.executor._signed_position_size(position)
             receipts = self.executor.reconcile_orders(
                 symbol=self.symbol,
                 desired_orders=[],
                 current_orders=position.active_orders,
-                current_position_size=0.0,
+                current_position_size=signed_position_size,
                 best_bid=best_bid,
                 best_ask=best_ask,
                 oracle_price=oracle_price,
             )
+            if position.side != TradeSide.FLAT:
+                receipts.append(
+                    self.executor.close_position(
+                        symbol=self.symbol,
+                        signed_position_size=signed_position_size,
+                        reason=plan.reason,
+                    )
+                )
             return [receipt.model_dump(mode="json") for receipt in receipts], None
 
         desired_orders = self.executor.build_orders_from_plan(
@@ -409,6 +388,13 @@ class BotRuntime:
             oracle_price=oracle_price,
         )
         return [receipt.model_dump(mode="json") for receipt in receipts], leverage_preflight
+
+    @staticmethod
+    def _has_recent_fill_since(updated_at: datetime, fills: list[object] | None) -> bool:
+        if not fills:
+            return False
+        fill_time = getattr(fills[-1], "time", None)
+        return isinstance(fill_time, datetime) and fill_time > updated_at
 
     def _position_state(
         self,

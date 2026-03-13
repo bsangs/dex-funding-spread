@@ -113,7 +113,8 @@ def _build_router(settings: AppSettings) -> RouterProtocol:
         return OpenAIRouter(
             api_key=settings.openai_api_key,
             model=settings.llm_model,
-            prompt_path=settings.prompt_path,
+            entry_prompt_path=settings.entry_prompt_path,
+            position_prompt_path=settings.position_prompt_path,
             timeout_s=settings.llm_timeout_s,
             verbosity=settings.openai_verbosity,
             reasoning_effort=settings.openai_reasoning_effort,
@@ -328,8 +329,6 @@ def _build_executor(
     validator = PreSubmitValidator(
         {symbol: asset_meta},
         max_price_deviation_bps=settings.max_price_deviation_bps,
-        min_liquidation_gap_pct=settings.min_liquidation_gap_pct,
-        max_stop_to_liq_fraction=settings.max_stop_to_liq_fraction,
     )
     budgeter = RateLimitBudgeter()
     rate_limit_payload = rest_gateway.user_rate_limit(user_address)
@@ -379,10 +378,10 @@ def inspect(
     extractor = FeatureExtractor()
     router = HeuristicPlaybookRouter()
     risk_policy = RiskPolicy(
-        risk_per_trade_pct=settings.risk_per_trade_pct,
         max_consecutive_losses=settings.kill_switch_max_consecutive_losses,
-        cluster_fade_long_weight=settings.cluster_fade_long_weight,
-        cluster_fade_short_weight=settings.cluster_fade_short_weight,
+        long_notional_fraction=settings.long_notional_fraction,
+        short_notional_fraction=settings.short_notional_fraction,
+        target_leverage=settings.target_leverage,
     )
     account = AccountState(
         equity=equity,
@@ -412,7 +411,11 @@ def prompt(
     prompt_text = render_router_prompt(
         frame=frame,
         features=features,
-        template=load_prompt_template(settings.prompt_path),
+        template=load_prompt_template(
+            settings.position_prompt_path
+            if frame.position.side != TradeSide.FLAT
+            else settings.entry_prompt_path
+        ),
     )
     console.print(prompt_text)
 
@@ -542,10 +545,10 @@ def route_live(
         max_leverage=settings.max_leverage,
     )
     risk = RiskPolicy(
-        risk_per_trade_pct=settings.risk_per_trade_pct,
         max_consecutive_losses=settings.kill_switch_max_consecutive_losses,
-        cluster_fade_long_weight=settings.cluster_fade_long_weight,
-        cluster_fade_short_weight=settings.cluster_fade_short_weight,
+        long_notional_fraction=settings.long_notional_fraction,
+        short_notional_fraction=settings.short_notional_fraction,
+        target_leverage=settings.target_leverage,
     ).assess(plan, account, frame.position, frame.kill_switch)
     console.print_json(
         json.dumps(
@@ -629,10 +632,10 @@ def execute_live(
         max_leverage=settings.max_leverage,
     )
     risk = RiskPolicy(
-        risk_per_trade_pct=settings.risk_per_trade_pct,
         max_consecutive_losses=settings.kill_switch_max_consecutive_losses,
-        cluster_fade_long_weight=settings.cluster_fade_long_weight,
-        cluster_fade_short_weight=settings.cluster_fade_short_weight,
+        long_notional_fraction=settings.long_notional_fraction,
+        short_notional_fraction=settings.short_notional_fraction,
+        target_leverage=settings.target_leverage,
     ).assess(plan, account, frame.position, frame.kill_switch)
     payload: dict[str, object] = {
         "frame": frame.model_dump(mode="json"),
@@ -764,10 +767,10 @@ def run_bot(
         ws_client=ws_client,
         executor=executor,
         risk_policy=RiskPolicy(
-            risk_per_trade_pct=settings.risk_per_trade_pct,
             max_consecutive_losses=settings.kill_switch_max_consecutive_losses,
-            cluster_fade_long_weight=settings.cluster_fade_long_weight,
-            cluster_fade_short_weight=settings.cluster_fade_short_weight,
+            long_notional_fraction=settings.long_notional_fraction,
+            short_notional_fraction=settings.short_notional_fraction,
+            target_leverage=settings.target_leverage,
         ),
         max_leverage=settings.max_leverage,
         strategy_interval_s=strategy_interval_s or settings.bot_strategy_interval_s,

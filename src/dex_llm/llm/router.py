@@ -7,23 +7,34 @@ from dex_llm.models import (
     FeatureSnapshot,
     MapQuality,
     MarketFrame,
+    OrderRole,
     Playbook,
-    RestingOrderPlan,
     TradePlan,
     TradeSide,
 )
 
 
 class RouterProtocol(Protocol):
-    def route(self, frame: MarketFrame, features: FeatureSnapshot) -> TradePlan: ...
+    def route(
+        self,
+        frame: MarketFrame,
+        features: FeatureSnapshot,
+        previous_plan: TradePlan | None = None,
+    ) -> TradePlan: ...
 
 
 class HeuristicPlaybookRouter:
     def __init__(self, dominant_ratio_threshold: float = 1.6) -> None:
         self.dominant_ratio_threshold = dominant_ratio_threshold
 
-    def route(self, frame: MarketFrame, features: FeatureSnapshot) -> TradePlan:
-        if not frame.kill_switch.allow_new_trades:
+    def route(
+        self,
+        frame: MarketFrame,
+        features: FeatureSnapshot,
+        previous_plan: TradePlan | None = None,
+    ) -> TradePlan:
+        _ = previous_plan
+        if not frame.kill_switch.allow_new_trades and frame.position.side == TradeSide.FLAT:
             reason = (
                 frame.kill_switch.reasons[0]
                 if frame.kill_switch.reasons
@@ -32,7 +43,7 @@ class HeuristicPlaybookRouter:
             return self._flat_plan(reason)
 
         if frame.position.side != TradeSide.FLAT:
-            return self._flat_plan("existing position detected; no averaging down")
+            return self._manage_open_position(frame)
 
         has_pending_entry = any(
             order.coin == frame.symbol and not order.reduce_only
@@ -55,19 +66,7 @@ class HeuristicPlaybookRouter:
             return self._magnet_follow(frame, features.dominant_cluster_side)
 
         if features.double_sweep_ready:
-            return TradePlan(
-                playbook=Playbook.DOUBLE_SWEEP,
-                side=TradeSide.FLAT,
-                entry_band=(frame.current_price, frame.current_price),
-                invalid_if=frame.current_price,
-                tp1=frame.current_price,
-                tp2=frame.current_price,
-                ttl_min=20,
-                reason=(
-                    "both nearby clusters are active, so wait for the first sweep "
-                    "and only trade the second move"
-                ),
-            )
+            return self._flat_plan("double sweep watch only; wait for one side to resolve first")
 
         if features.cluster_fade_ready:
             return self._cluster_fade(frame)
@@ -164,27 +163,79 @@ class HeuristicPlaybookRouter:
             expected_touch_minutes=None,
         )
 
+    def _manage_open_position(self, frame: MarketFrame) -> TradePlan:
+        side = frame.position.side
+        entry_reference = frame.current_price
+        band_half_width = max(frame.atr * 0.05, 1.0)
+        existing_exits = {
+            order.role: (order.trigger_price or order.limit_price)
+            for order in frame.position.active_orders
+            if order.coin == frame.symbol and order.reduce_only
+        }
+        if side == TradeSide.LONG:
+            stop_price = existing_exits.get(
+                OrderRole.STOP_LOSS,
+                frame.current_price - frame.atr * 0.45,
+            )
+            tp1 = max(
+                existing_exits.get(OrderRole.TAKE_PROFIT_1, frame.current_price + frame.atr * 0.6),
+                frame.current_price + frame.atr * 0.3,
+            )
+            tp2 = max(
+                existing_exits.get(OrderRole.TAKE_PROFIT_2, frame.current_price + frame.atr * 1.2),
+                tp1 + frame.atr * 0.4,
+            )
+        else:
+            stop_price = existing_exits.get(
+                OrderRole.STOP_LOSS,
+                frame.current_price + frame.atr * 0.45,
+            )
+            tp1 = min(
+                existing_exits.get(OrderRole.TAKE_PROFIT_1, frame.current_price - frame.atr * 0.6),
+                frame.current_price - frame.atr * 0.3,
+            )
+            tp2 = min(
+                existing_exits.get(OrderRole.TAKE_PROFIT_2, frame.current_price - frame.atr * 1.2),
+                tp1 - frame.atr * 0.4,
+            )
+        return TradePlan(
+            playbook=Playbook.MAGNET_FOLLOW,
+            side=side,
+            entry_band=(
+                entry_reference - band_half_width,
+                entry_reference + band_half_width,
+            ),
+            invalid_if=stop_price,
+            tp1=tp1,
+            tp2=tp2,
+            ttl_min=5,
+            reason="fallback position review keeps the open trade and updates progressive exits",
+            touch_confidence=1.0,
+            expected_touch_minutes=5,
+        )
+
     def _cluster_fade(self, frame: MarketFrame) -> TradePlan:
         upper_cluster = max(frame.clusters_above, key=lambda cluster: cluster.size)
         lower_cluster = max(frame.clusters_below, key=lambda cluster: cluster.size)
         band_half_width = max(frame.atr * 0.05, 1.0)
-
-        lower_long = RestingOrderPlan(
-            side=TradeSide.LONG,
-            entry_band=(
-                lower_cluster.price - band_half_width,
-                lower_cluster.price + band_half_width,
-            ),
-            invalid_if=lower_cluster.price - frame.atr * 0.25,
-            tp1=frame.current_price,
-            tp2=min(upper_cluster.price, frame.current_price + frame.atr),
-            ttl_min=30,
-            reason="rest a long fade at the lower liquidation wall",
-            cluster_price=lower_cluster.price,
-            touch_confidence=0.68,
-            expected_touch_minutes=30,
-        )
-        upper_short = RestingOrderPlan(
+        if lower_cluster.size >= upper_cluster.size:
+            return TradePlan(
+                playbook=Playbook.CLUSTER_FADE,
+                side=TradeSide.LONG,
+                entry_band=(
+                    lower_cluster.price - band_half_width,
+                    lower_cluster.price + band_half_width,
+                ),
+                invalid_if=lower_cluster.price - frame.atr * 0.25,
+                tp1=frame.current_price,
+                tp2=min(upper_cluster.price, frame.current_price + frame.atr),
+                ttl_min=30,
+                reason="fade the lower wall with a single long limit order",
+                touch_confidence=0.68,
+                expected_touch_minutes=30,
+            )
+        return TradePlan(
+            playbook=Playbook.CLUSTER_FADE,
             side=TradeSide.SHORT,
             entry_band=(
                 upper_cluster.price - band_half_width,
@@ -194,21 +245,7 @@ class HeuristicPlaybookRouter:
             tp1=frame.current_price,
             tp2=max(lower_cluster.price, frame.current_price - frame.atr),
             ttl_min=30,
-            reason="rest a short fade at the upper liquidation wall",
-            cluster_price=upper_cluster.price,
+            reason="fade the upper wall with a single short limit order",
             touch_confidence=0.68,
             expected_touch_minutes=30,
-        )
-        return TradePlan(
-            playbook=Playbook.CLUSTER_FADE,
-            side=TradeSide.FLAT,
-            entry_band=(0.0, 0.0),
-            invalid_if=0.0,
-            tp1=0.0,
-            tp2=0.0,
-            ttl_min=30,
-            reason="arm both upper-short and lower-long fade bands around major clusters",
-            touch_confidence=0.68,
-            expected_touch_minutes=30,
-            resting_orders=[lower_long, upper_short],
         )
