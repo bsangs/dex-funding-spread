@@ -125,6 +125,8 @@ class LiveFrameBuilder:
         book = self.hyperliquid_client.fetch_l2_book(symbol)
         candles_5m = self.hyperliquid_client.fetch_candles(symbol, "5m", limit=30)
         candles_15m = self.hyperliquid_client.fetch_candles(symbol, "15m", limit=30)
+        candles_1h = self.hyperliquid_client.fetch_candles(symbol, "1h", limit=48)
+        candles_4h = self.hyperliquid_client.fetch_candles(symbol, "4h", limit=30)
         public_latency_ms = (perf_counter() - public_started) * 1000
 
         heatmap_errors: list[str] = []
@@ -243,6 +245,7 @@ class LiveFrameBuilder:
             "heatmap_provider": heatmap_snapshot.provider,
             "public_data_latency_ms": round(public_latency_ms, 2),
             "component_timestamps": component_timestamps,
+            "higher_timeframe_levels": _higher_timeframe_levels(candles_1h, candles_4h),
         }
         if heatmap_errors:
             metadata["heatmap_error"] = heatmap_errors[0]
@@ -280,6 +283,8 @@ class LiveFrameBuilder:
             current_price=book.mid_price,
             candles_5m=candles_5m[-30:],
             candles_15m=candles_15m[-30:],
+            candles_1h=candles_1h[-48:],
+            candles_4h=candles_4h[-30:],
             clusters_above=heatmap_snapshot.clusters_above[:3],
             clusters_below=heatmap_snapshot.clusters_below[:3],
             atr=max(compute_atr(candles_15m), 1.0),
@@ -402,6 +407,10 @@ class LiveFrameBuilder:
                 key: value.isoformat() for key, value in snapshot.channel_timestamps.items()
             },
             "channel_snapshot_flags": dict(snapshot.channel_snapshot_flags),
+            "higher_timeframe_levels": _higher_timeframe_levels(
+                snapshot.candles_1h,
+                snapshot.candles_4h,
+            ),
         }
         if snapshot.bbo is not None:
             metadata["bbo_mid"] = snapshot.bbo.mid
@@ -436,6 +445,8 @@ class LiveFrameBuilder:
             current_price=book.mid_price,
             candles_5m=snapshot.candles_5m[-30:],
             candles_15m=snapshot.candles_15m[-30:],
+            candles_1h=snapshot.candles_1h[-48:],
+            candles_4h=snapshot.candles_4h[-30:],
             clusters_above=heatmap_snapshot.clusters_above[:3],
             clusters_below=heatmap_snapshot.clusters_below[:3],
             atr=max(compute_atr(snapshot.candles_15m), 1.0),
@@ -660,3 +671,21 @@ def _channel_age_ms(snapshot: LiveStateSnapshot, channels: tuple[str, ...]) -> f
     newest = max(matched)
     reference_time = snapshot.captured_at or datetime.now(tz=UTC)
     return max(0.0, (reference_time - newest).total_seconds() * 1000)
+
+
+def _higher_timeframe_levels(
+    candles_1h: list[Candle],
+    candles_4h: list[Candle],
+) -> dict[str, float] | None:
+    if not candles_1h and not candles_4h:
+        return None
+    payload: dict[str, float] = {}
+    if candles_1h:
+        recent_1h = candles_1h[-24:]
+        payload["high_24h"] = max(candle.high for candle in recent_1h)
+        payload["low_24h"] = min(candle.low for candle in recent_1h)
+    if candles_4h:
+        recent_4h = candles_4h[-12:]
+        payload["swing_high_4h"] = max(candle.high for candle in recent_4h)
+        payload["swing_low_4h"] = min(candle.low for candle in recent_4h)
+    return payload or None

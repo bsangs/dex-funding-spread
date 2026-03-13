@@ -47,6 +47,10 @@ def test_router_input_prefers_local_heatmap_image(tmp_path: Path) -> None:
     assert content[1]["type"] == "input_image"
     assert str(content[1]["image_url"]).startswith("data:image/png;base64,")
     assert "지정가 구간" in str(content[0]["text"])
+    structured_context = str(content[2]["text"])
+    assert '"entry_candidates"' in structured_context
+    assert '"candles_1h"' in structured_context
+    assert '"candles_4h"' in structured_context
 
 
 def test_router_input_falls_back_to_remote_heatmap_url() -> None:

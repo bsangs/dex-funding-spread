@@ -80,16 +80,16 @@ class HeuristicPlaybookRouter:
                 playbook=Playbook.MAGNET_FOLLOW,
                 side=TradeSide.LONG,
                 entry_band=(
-                    frame.current_price - frame.atr * 0.1,
-                    frame.current_price + frame.atr * 0.1,
+                    frame.current_price - frame.atr * 0.6,
+                    frame.current_price - frame.atr * 0.35,
                 ),
-                invalid_if=frame.current_price - frame.atr * 0.6,
-                tp1=frame.current_price + frame.atr * 0.7,
+                invalid_if=frame.current_price - frame.atr * 1.1,
+                tp1=frame.current_price + frame.atr * 0.8,
                 tp2=top_cluster.price,
-                ttl_min=20,
-                reason="upside cluster dominates and sits behind a clean vacuum",
+                ttl_min=90,
+                reason="upside cluster dominates, so wait for a deeper pullback into the vacuum",
                 touch_confidence=0.72,
-                expected_touch_minutes=20,
+                expected_touch_minutes=60,
             )
 
         top_cluster = max(frame.clusters_below, key=lambda cluster: cluster.size)
@@ -97,16 +97,16 @@ class HeuristicPlaybookRouter:
             playbook=Playbook.MAGNET_FOLLOW,
             side=TradeSide.SHORT,
             entry_band=(
-                frame.current_price - frame.atr * 0.1,
-                frame.current_price + frame.atr * 0.1,
+                frame.current_price + frame.atr * 0.35,
+                frame.current_price + frame.atr * 0.6,
             ),
-            invalid_if=frame.current_price + frame.atr * 0.6,
-            tp1=frame.current_price - frame.atr * 0.7,
+            invalid_if=frame.current_price + frame.atr * 1.1,
+            tp1=frame.current_price - frame.atr * 0.8,
             tp2=top_cluster.price,
-            ttl_min=20,
-            reason="downside cluster dominates and sits behind a clean vacuum",
+            ttl_min=90,
+            reason="downside cluster dominates, so wait for a deeper pullback into the vacuum",
             touch_confidence=0.72,
-            expected_touch_minutes=20,
+            expected_touch_minutes=60,
         )
 
     def _sweep_reclaim(self, frame: MarketFrame) -> TradePlan:
@@ -118,16 +118,16 @@ class HeuristicPlaybookRouter:
                 playbook=Playbook.SWEEP_RECLAIM,
                 side=TradeSide.SHORT,
                 entry_band=(
-                    frame.current_price - frame.atr * 0.08,
-                    frame.current_price + frame.atr * 0.05,
+                    swept_price - frame.atr * 0.1,
+                    swept_price + frame.atr * 0.05,
                 ),
-                invalid_if=swept_price + frame.atr * 0.15,
-                tp1=frame.current_price - frame.atr * 0.6,
-                tp2=frame.current_price - frame.atr * 1.2,
-                ttl_min=12,
-                reason="price swept the upper cluster and reclaimed back inside the prior range",
+                invalid_if=swept_price + frame.atr * 0.35,
+                tp1=frame.current_price - frame.atr * 0.8,
+                tp2=frame.current_price - frame.atr * 1.6,
+                ttl_min=60,
+                reason="price swept the upper cluster, so wait for a retest before leaning short",
                 touch_confidence=0.82,
-                expected_touch_minutes=12,
+                expected_touch_minutes=45,
             )
 
         if frame.sweep.cluster_price is None:
@@ -137,16 +137,16 @@ class HeuristicPlaybookRouter:
             playbook=Playbook.SWEEP_RECLAIM,
             side=TradeSide.LONG,
             entry_band=(
-                frame.current_price - frame.atr * 0.05,
-                frame.current_price + frame.atr * 0.08,
+                swept_price - frame.atr * 0.05,
+                swept_price + frame.atr * 0.1,
             ),
-            invalid_if=swept_price - frame.atr * 0.15,
-            tp1=frame.current_price + frame.atr * 0.6,
-            tp2=frame.current_price + frame.atr * 1.2,
-            ttl_min=12,
-            reason="price swept the lower cluster and reclaimed back inside the prior range",
+            invalid_if=swept_price - frame.atr * 0.35,
+            tp1=frame.current_price + frame.atr * 0.8,
+            tp2=frame.current_price + frame.atr * 1.6,
+            ttl_min=60,
+            reason="price swept the lower cluster, so wait for a retest before leaning long",
             touch_confidence=0.82,
-            expected_touch_minutes=12,
+            expected_touch_minutes=45,
         )
 
     def _flat_plan(self, reason: str) -> TradePlan:
@@ -221,10 +221,10 @@ class HeuristicPlaybookRouter:
                 invalid_if=lower_cluster.price - frame.atr * 0.25,
                 tp1=frame.current_price,
                 tp2=min(upper_cluster.price, frame.current_price + frame.atr),
-                ttl_min=30,
+                ttl_min=90,
                 reason="fade the lower wall with a single long limit order",
                 touch_confidence=0.68,
-                expected_touch_minutes=30,
+                expected_touch_minutes=60,
             )
         return TradePlan(
             playbook=Playbook.CLUSTER_FADE,
@@ -236,8 +236,8 @@ class HeuristicPlaybookRouter:
             invalid_if=upper_cluster.price + frame.atr * 0.25,
             tp1=frame.current_price,
             tp2=max(lower_cluster.price, frame.current_price - frame.atr),
-            ttl_min=30,
+            ttl_min=90,
             reason="fade the upper wall with a single short limit order",
             touch_confidence=0.68,
-            expected_touch_minutes=30,
+            expected_touch_minutes=60,
         )

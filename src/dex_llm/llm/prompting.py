@@ -34,9 +34,15 @@ def build_router_payload(
         "top_clusters_below": [
             cluster.model_dump(mode="json") for cluster in frame.clusters_below[:3]
         ],
+        "higher_timeframe_levels": frame.metadata.get("higher_timeframe_levels"),
+        "entry_candidates": [
+            candidate.model_dump(mode="json") for candidate in features.entry_candidates
+        ],
         "features": features.model_dump(mode="json"),
         "candles_5m": [candle.model_dump(mode="json") for candle in frame.candles_5m[-6:]],
-        "candles_15m": [candle.model_dump(mode="json") for candle in frame.candles_15m[-4:]],
+        "candles_15m": [candle.model_dump(mode="json") for candle in frame.candles_15m[-12:]],
+        "candles_1h": [candle.model_dump(mode="json") for candle in frame.candles_1h[-12:]],
+        "candles_4h": [candle.model_dump(mode="json") for candle in frame.candles_4h[-8:]],
     }
 
 

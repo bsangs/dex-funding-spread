@@ -803,7 +803,7 @@ def test_execute_plan_rejects_invalid_tp_sl_plan_even_if_validation_is_bypassed(
     assert len(receipts) == 1
     assert receipts[0].action == "plan_guard"
     assert receipts[0].status == OrderState.REJECTED
-    assert "TP/SL protection" in receipts[0].message
+    assert "valid exits" in receipts[0].message
     assert not exchange.ordered
 
 

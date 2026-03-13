@@ -282,6 +282,8 @@ class LiveStateSnapshot(BaseModel):
     order_book: OrderBookSnapshot
     candles_5m: list[Candle]
     candles_15m: list[Candle]
+    candles_1h: list[Candle] = Field(default_factory=list)
+    candles_4h: list[Candle] = Field(default_factory=list)
     bbo: BboSnapshot | None = None
     active_asset_ctx: HyperliquidActiveAssetContext | None = None
     clearinghouse_state: HyperliquidClearinghouseState | None = None
@@ -299,6 +301,8 @@ class MarketFrame(BaseModel):
     current_price: float = Field(gt=0.0)
     candles_5m: list[Candle]
     candles_15m: list[Candle]
+    candles_1h: list[Candle] = Field(default_factory=list)
+    candles_4h: list[Candle] = Field(default_factory=list)
     clusters_above: list[Cluster]
     clusters_below: list[Cluster]
     atr: float = Field(gt=0.0)
@@ -326,6 +330,17 @@ class MarketFrame(BaseModel):
         return self
 
 
+class EntryCandidate(BaseModel):
+    side: TradeSide
+    entry_band: tuple[float, float]
+    anchor_price: float
+    anchor_type: str
+    distance_atr: float = Field(ge=0.0)
+    persistence_score: float = Field(ge=0.0, le=1.0)
+    expected_wait_minutes: int = Field(ge=1)
+    reason: str
+
+
 class FeatureSnapshot(BaseModel):
     dominant_cluster_side: ClusterSide | None
     dominant_ratio: float
@@ -338,6 +353,7 @@ class FeatureSnapshot(BaseModel):
     double_sweep_ready: bool
     cluster_fade_ready: bool
     directional_vacuum: bool
+    entry_candidates: list[EntryCandidate] = Field(default_factory=list)
     notes: list[str]
 
 
@@ -358,12 +374,12 @@ def _validate_trade_levels(
         raise ValueError(f"{label} entry_band must be positive for an actionable trade")
 
     if invalid_if <= 0 or tp1 <= 0 or tp2 <= 0:
-        raise ValueError(f"{label} requires stop loss and both take-profit targets")
+        raise ValueError(f"{label} requires an invalidation level and both take-profit targets")
 
     mid_entry = (band_low + band_high) / 2
     if side == TradeSide.LONG:
         if invalid_if >= mid_entry:
-            raise ValueError(f"{label} stop loss must sit below the entry band")
+            raise ValueError(f"{label} invalidation level must sit below the entry band")
         if tp1 <= mid_entry or tp2 <= mid_entry:
             raise ValueError(f"{label} take-profit targets must sit above the entry band")
         if tp2 < tp1:
@@ -371,7 +387,7 @@ def _validate_trade_levels(
         return
 
     if invalid_if <= mid_entry:
-        raise ValueError(f"{label} stop loss must sit above the entry band")
+        raise ValueError(f"{label} invalidation level must sit above the entry band")
     if tp1 >= mid_entry or tp2 >= mid_entry:
         raise ValueError(f"{label} take-profit targets must sit below the entry band")
     if tp2 > tp1:

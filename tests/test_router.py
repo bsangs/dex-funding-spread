@@ -21,7 +21,7 @@ def test_router_prefers_magnet_follow_for_directional_vacuum_sample() -> None:
     assert plan.playbook == Playbook.MAGNET_FOLLOW
     assert plan.side == TradeSide.LONG
     assert plan.touch_confidence > 0.5
-    assert plan.expected_touch_minutes == 20
+    assert plan.expected_touch_minutes == 60
 
 
 def test_router_returns_cluster_fade_only_when_clusters_are_balanced() -> None:

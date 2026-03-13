@@ -217,6 +217,12 @@ def _build_ws_frame(
         ws_client.connect(symbol, user_address=user_address)
         ws_client.wait_until_public_ready(timeout_s=settings.request_timeout_s)
         snapshot = ws_client.snapshot().model_copy(update={"captured_at": datetime.now(tz=UTC)})
+        snapshot = snapshot.model_copy(
+            update={
+                "candles_1h": rest_gateway.fetch_candles(symbol, "1h", limit=48),
+                "candles_4h": rest_gateway.fetch_candles(symbol, "4h", limit=30),
+            }
+        )
         fills = None
         fills_safe_complete = True
         private_source = "ws" if ws_client.private_state_ready() else "pending"

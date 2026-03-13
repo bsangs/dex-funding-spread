@@ -172,6 +172,12 @@ class BotRuntime:
         snapshot = self.ws_client.snapshot().model_copy(
             update={"captured_at": datetime.now(tz=UTC)}
         )
+        snapshot = snapshot.model_copy(
+            update={
+                "candles_1h": self.rest_gateway.fetch_candles(self.symbol, "1h", limit=48),
+                "candles_4h": self.rest_gateway.fetch_candles(self.symbol, "4h", limit=30),
+            }
+        )
         fills: list[object] | None = None
         fills_safe_complete = True
         private_source = "ws" if self.ws_client.private_state_ready() else "pending"
@@ -234,11 +240,18 @@ class BotRuntime:
         )
         frame = frame.model_copy(update={"position": position})
         features = FeatureExtractor().extract(frame)
+        previous_plan = self._strategy_state.plan if self._strategy_state is not None else None
         plan = self.router.route(
             frame,
             features,
-            previous_plan=self._strategy_state.plan if self._strategy_state is not None else None,
+            previous_plan=previous_plan,
         )
+        if previous_plan is not None:
+            plan = self._stabilize_plan(
+                frame=frame,
+                previous_plan=previous_plan,
+                candidate_plan=plan,
+            )
         account = self._account_from_snapshot(snapshot)
         risk = self.risk_policy.assess(plan, account, position, frame.kill_switch)
         return StrategyState(
@@ -302,6 +315,37 @@ class BotRuntime:
         if self._directional_entry_invalidated(plan, current_price):
             return self._flat_plan("directional entry invalidated before fill")
         return plan
+
+    @staticmethod
+    def _stabilize_plan(
+        *,
+        frame: MarketFrame,
+        previous_plan: TradePlan,
+        candidate_plan: TradePlan,
+    ) -> TradePlan:
+        if (
+            previous_plan.playbook == Playbook.NO_TRADE
+            or candidate_plan.playbook == Playbook.NO_TRADE
+            or previous_plan.side != candidate_plan.side
+            or previous_plan.resting_orders
+            or candidate_plan.resting_orders
+        ):
+            return candidate_plan
+
+        previous_mid = sum(previous_plan.entry_band) / 2
+        candidate_mid = sum(candidate_plan.entry_band) / 2
+        entry_shift = abs(previous_mid - candidate_mid)
+        tp_shift = abs(previous_plan.tp2 - candidate_plan.tp2)
+        if entry_shift <= frame.atr * 0.25 and tp_shift <= frame.atr * 0.35:
+            return previous_plan.model_copy(
+                update={
+                    "reason": (
+                        "keep prior resting idea; "
+                        "new cycle does not materially improve the level"
+                    ),
+                }
+            )
+        return candidate_plan
 
     def _sync_orders(
         self,

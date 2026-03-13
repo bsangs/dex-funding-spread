@@ -1282,7 +1282,7 @@ class HyperliquidExchangeExecutor:
                     tp2=order.tp2,
                 )
                 if error is not None:
-                    return f"resting order {index} is missing valid TP/SL protection: {error}"
+                    return f"resting order {index} is missing valid exits: {error}"
             return None
 
         if plan.side == TradeSide.FLAT:
@@ -1297,7 +1297,7 @@ class HyperliquidExchangeExecutor:
         )
         if error is None:
             return None
-        return f"actionable trade plan is missing valid TP/SL protection: {error}"
+        return f"actionable trade plan is missing valid exits: {error}"
 
     @staticmethod
     def _protection_level_error(
@@ -1315,12 +1315,12 @@ class HyperliquidExchangeExecutor:
         if band_low <= 0 or band_high <= 0:
             return "entry band must be positive"
         if invalid_if <= 0 or tp1 <= 0 or tp2 <= 0:
-            return "stop loss and both take-profit targets must be positive"
+            return "invalidation level and both take-profit targets must be positive"
 
         mid_entry = (band_low + band_high) / 2
         if side == TradeSide.LONG:
             if invalid_if >= mid_entry:
-                return "stop loss must sit below the entry band"
+                return "invalidation level must sit below the entry band"
             if tp1 <= mid_entry or tp2 <= mid_entry:
                 return "take-profit targets must sit above the entry band"
             if tp2 < tp1:
@@ -1328,7 +1328,7 @@ class HyperliquidExchangeExecutor:
             return None
 
         if invalid_if <= mid_entry:
-            return "stop loss must sit above the entry band"
+            return "invalidation level must sit above the entry band"
         if tp1 >= mid_entry or tp2 >= mid_entry:
             return "take-profit targets must sit below the entry band"
         if tp2 > tp1:

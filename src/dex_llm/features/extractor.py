@@ -1,6 +1,14 @@
 from __future__ import annotations
 
-from dex_llm.models import Cluster, ClusterShape, ClusterSide, FeatureSnapshot, MarketFrame
+from dex_llm.models import (
+    Cluster,
+    ClusterShape,
+    ClusterSide,
+    EntryCandidate,
+    FeatureSnapshot,
+    MarketFrame,
+    TradeSide,
+)
 
 
 class FeatureExtractor:
@@ -51,6 +59,11 @@ class FeatureExtractor:
             and closest_below_distance <= frame.atr * self.cluster_fade_distance_atr_multiple
             and not directional_vacuum
         )
+        entry_candidates = self._entry_candidates(
+            frame=frame,
+            top_above=top_above,
+            top_below=top_below,
+        )
 
         notes: list[str] = []
         if dominant_side is not None:
@@ -62,6 +75,8 @@ class FeatureExtractor:
             notes.append("double_sweep_ready")
         if cluster_fade_ready:
             notes.append("cluster_fade_ready")
+        if entry_candidates:
+            notes.append(f"entry_candidates:{len(entry_candidates)}")
         if frame.map_quality.value != "clean":
             notes.append(f"map_quality:{frame.map_quality.value}")
 
@@ -77,6 +92,7 @@ class FeatureExtractor:
             double_sweep_ready=double_sweep_ready,
             cluster_fade_ready=cluster_fade_ready,
             directional_vacuum=directional_vacuum,
+            entry_candidates=entry_candidates,
             notes=notes,
         )
 
@@ -140,3 +156,163 @@ class FeatureExtractor:
                 and frame.current_price - top_below.price >= frame.atr * 0.5
             )
         return False
+
+    def _entry_candidates(
+        self,
+        *,
+        frame: MarketFrame,
+        top_above: Cluster | None,
+        top_below: Cluster | None,
+    ) -> list[EntryCandidate]:
+        candidates: list[EntryCandidate] = []
+        top_clusters = frame.clusters_above[:3] + frame.clusters_below[:3]
+        total_cluster_size = sum(cluster.size for cluster in top_clusters)
+        htf_levels = self._higher_timeframe_levels(frame)
+        band_half_width = max(frame.atr * 0.08, 1.0)
+
+        if top_below is not None:
+            candidates.append(
+                self._cluster_candidate(
+                    side=TradeSide.LONG,
+                    cluster=top_below,
+                    current_price=frame.current_price,
+                    atr=frame.atr,
+                    total_cluster_size=total_cluster_size,
+                    band_half_width=band_half_width,
+                    htf_levels=htf_levels,
+                )
+            )
+        if top_above is not None:
+            candidates.append(
+                self._cluster_candidate(
+                    side=TradeSide.SHORT,
+                    cluster=top_above,
+                    current_price=frame.current_price,
+                    atr=frame.atr,
+                    total_cluster_size=total_cluster_size,
+                    band_half_width=band_half_width,
+                    htf_levels=htf_levels,
+                )
+            )
+
+        if frame.sweep.cluster_price is not None and frame.sweep.touched_cluster_side is not None:
+            sweep_side = (
+                TradeSide.SHORT
+                if frame.sweep.touched_cluster_side == ClusterSide.ABOVE
+                else TradeSide.LONG
+            )
+            distance_atr = (
+                abs(frame.current_price - frame.sweep.cluster_price)
+                / max(frame.atr, 1.0)
+            )
+            alignment = self._htf_alignment_score(
+                price=frame.sweep.cluster_price,
+                atr=frame.atr,
+                htf_levels=htf_levels,
+            )
+            candidates.append(
+                EntryCandidate(
+                    side=sweep_side,
+                    entry_band=(
+                        frame.sweep.cluster_price - band_half_width,
+                        frame.sweep.cluster_price + band_half_width,
+                    ),
+                    anchor_price=frame.sweep.cluster_price,
+                    anchor_type="sweep_retest",
+                    distance_atr=round(distance_atr, 2),
+                    persistence_score=min(1.0, round(0.6 + alignment, 2)),
+                    expected_wait_minutes=self._expected_wait_minutes(
+                        distance_atr=distance_atr,
+                        persistence_score=min(1.0, 0.6 + alignment),
+                    ),
+                    reason="wait for a retest of the swept liquidity wall instead of chasing",
+                )
+            )
+
+        candidates.sort(
+            key=lambda candidate: (
+                candidate.persistence_score,
+                candidate.distance_atr,
+            ),
+            reverse=True,
+        )
+        return candidates[:3]
+
+    def _cluster_candidate(
+        self,
+        *,
+        side: TradeSide,
+        cluster: Cluster,
+        current_price: float,
+        atr: float,
+        total_cluster_size: float,
+        band_half_width: float,
+        htf_levels: list[float],
+    ) -> EntryCandidate:
+        distance_atr = abs(current_price - cluster.price) / max(atr, 1.0)
+        size_share = (cluster.size / total_cluster_size) if total_cluster_size > 0 else 0.0
+        shape_bonus = 0.12 if cluster.shape == ClusterShape.SINGLE_WALL else 0.05
+        alignment = self._htf_alignment_score(price=cluster.price, atr=atr, htf_levels=htf_levels)
+        persistence_score = min(1.0, round(0.35 + size_share + shape_bonus + alignment, 2))
+        return EntryCandidate(
+            side=side,
+            entry_band=(
+                cluster.price - band_half_width,
+                cluster.price + band_half_width,
+            ),
+            anchor_price=cluster.price,
+            anchor_type="cluster_retest",
+            distance_atr=round(distance_atr, 2),
+            persistence_score=persistence_score,
+            expected_wait_minutes=self._expected_wait_minutes(
+                distance_atr=distance_atr,
+                persistence_score=persistence_score,
+            ),
+            reason=(
+                "prefer a retest of the persistent liquidation wall "
+                "instead of the current price"
+            ),
+        )
+
+    @staticmethod
+    def _higher_timeframe_levels(frame: MarketFrame) -> list[float]:
+        levels: list[float] = []
+        if frame.candles_1h:
+            window_1h = frame.candles_1h[-24:]
+            levels.extend(
+                [
+                    max(candle.high for candle in window_1h),
+                    min(candle.low for candle in window_1h),
+                ]
+            )
+        if frame.candles_4h:
+            window_4h = frame.candles_4h[-12:]
+            levels.extend(
+                [
+                    max(candle.high for candle in window_4h),
+                    min(candle.low for candle in window_4h),
+                ]
+            )
+        return levels
+
+    @staticmethod
+    def _htf_alignment_score(
+        *,
+        price: float,
+        atr: float,
+        htf_levels: list[float],
+    ) -> float:
+        if not htf_levels:
+            return 0.0
+        tolerance = max(atr * 0.35, 1.0)
+        matched = sum(1 for level in htf_levels if abs(level - price) <= tolerance)
+        return min(0.25, matched * 0.08)
+
+    @staticmethod
+    def _expected_wait_minutes(
+        *,
+        distance_atr: float,
+        persistence_score: float,
+    ) -> int:
+        estimate = int(25 + distance_atr * 18 + (1 - persistence_score) * 25)
+        return max(20, min(120, estimate))
