@@ -16,6 +16,8 @@ bot_strategy_interval_s = 300
 bot_sync_interval_s = 120
 long_notional_fraction = 1.0
 short_notional_fraction = 0.4
+# false로 두면 stop loss child 주문을 만들지 않음
+enable_stop_loss = false
 base_leverage = 6.0
 max_leverage = 10.0
 openai_image_detail = "auto"

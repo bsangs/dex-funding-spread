@@ -11,12 +11,10 @@ class KillSwitchPolicy:
         max_info_latency_ms: float = 1_500.0,
         max_private_latency_ms: float = 1_500.0,
         max_data_age_ms: float = 15_000.0,
-        max_consecutive_losses: int = 2,
     ) -> None:
         self.max_info_latency_ms = max_info_latency_ms
         self.max_private_latency_ms = max_private_latency_ms
         self.max_data_age_ms = max_data_age_ms
-        self.max_consecutive_losses = max_consecutive_losses
 
     def evaluate(
         self,
@@ -57,9 +55,6 @@ class KillSwitchPolicy:
 
         if heatmap_error is not None:
             reasons.append(f"heatmap provider error: {heatmap_error}")
-
-        if position.consecutive_losses_today >= self.max_consecutive_losses:
-            reasons.append("daily loss streak limit reached")
 
         if position.entries_blocked_reduce_only:
             reasons.append("ambiguous live entry state requires reduce-only mode")

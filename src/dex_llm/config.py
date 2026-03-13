@@ -46,9 +46,9 @@ class AppSettings(BaseSettings):
     kill_switch_max_info_latency_ms: float = 1_500.0
     kill_switch_max_private_latency_ms: float = 1_500.0
     kill_switch_max_data_age_ms: float = 15_000.0
-    kill_switch_max_consecutive_losses: int = 2
     long_notional_fraction: float = 1.0
     short_notional_fraction: float = 0.4
+    enable_stop_loss: bool = False
     execution_mode: ExecutionMode = ExecutionMode.PAPER
     margin_mode: MarginMode = MarginMode.ISOLATED
     target_leverage: int = 10

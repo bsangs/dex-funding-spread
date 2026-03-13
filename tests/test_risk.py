@@ -32,7 +32,7 @@ def test_risk_policy_sizes_allowed_trade() -> None:
     assert "side-based sizing checks passed" in assessment.reason
 
 
-def test_risk_policy_blocks_after_two_losses() -> None:
+def test_risk_policy_does_not_block_after_two_losses() -> None:
     frame = load_sample_frame()
     frame.position = PositionState(side=TradeSide.FLAT, consecutive_losses_today=2)
     plan = HeuristicPlaybookRouter().route(frame, FeatureExtractor().extract(frame))
@@ -40,8 +40,8 @@ def test_risk_policy_blocks_after_two_losses() -> None:
 
     assessment = RiskPolicy().assess(plan, account, frame.position, frame.kill_switch)
 
-    assert assessment.allowed is False
-    assert "loss streak" in assessment.reason
+    assert assessment.allowed is True
+    assert assessment.recommended_quantity > 0
 
 
 def test_risk_policy_blocks_when_kill_switch_is_active() -> None:

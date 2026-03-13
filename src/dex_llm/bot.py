@@ -61,6 +61,7 @@ class BotRuntime:
         live: bool = False,
         execution_mode_live: bool = False,
         dex: str = "",
+        enable_stop_loss: bool = True,
         console: Console | None = None,
     ) -> None:
         self.symbol = symbol
@@ -79,7 +80,7 @@ class BotRuntime:
         self.live = live or execution_mode_live
         self.dex = dex
         self.console = console or Console()
-        self.paper_broker = PaperBroker()
+        self.paper_broker = PaperBroker(enable_stop_loss=enable_stop_loss)
         self._strategy_state: StrategyState | None = None
 
     def run(self, *, max_cycles: int | None = None) -> None:
@@ -375,7 +376,20 @@ class BotRuntime:
             )
             leverage_preflight = leverage_result.model_dump(mode="json")
             if not leverage_result.valid:
-                raise RuntimeError(leverage_result.reason)
+                return [
+                    {
+                        "mode": "live",
+                        "symbol": self.symbol,
+                        "action": "leverage_preflight",
+                        "cloid": "leverage-preflight",
+                        "oid": None,
+                        "decision": "await_resolution",
+                        "success": False,
+                        "status": "rejected",
+                        "message": leverage_result.reason,
+                        "raw_response": leverage_preflight,
+                    }
+                ], leverage_preflight
 
         receipts = self.executor.execute_plan(
             plan=plan,
@@ -503,6 +517,7 @@ class BotRuntime:
             "position_side": position.side,
             "open_orders": position.open_orders,
             "account_equity": account.equity,
+            "available_margin": account.available_margin,
             "plan": plan.model_dump(mode="json"),
             "risk": risk.model_dump(mode="json"),
             "leverage_preflight": leverage_preflight,

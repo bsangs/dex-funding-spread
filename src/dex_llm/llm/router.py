@@ -177,27 +177,19 @@ class HeuristicPlaybookRouter:
                 OrderRole.STOP_LOSS,
                 frame.current_price - frame.atr * 0.45,
             )
-            tp1 = max(
-                existing_exits.get(OrderRole.TAKE_PROFIT_1, frame.current_price + frame.atr * 0.6),
-                frame.current_price + frame.atr * 0.3,
-            )
-            tp2 = max(
-                existing_exits.get(OrderRole.TAKE_PROFIT_2, frame.current_price + frame.atr * 1.2),
-                tp1 + frame.atr * 0.4,
-            )
+            existing_tp1 = existing_exits.get(OrderRole.TAKE_PROFIT_1)
+            existing_tp2 = existing_exits.get(OrderRole.TAKE_PROFIT_2)
+            tp1 = existing_tp1 or existing_tp2 or (frame.current_price + frame.atr * 0.6)
+            tp2 = existing_tp2 or max(tp1 + frame.atr * 0.4, frame.current_price + frame.atr * 1.2)
         else:
             stop_price = existing_exits.get(
                 OrderRole.STOP_LOSS,
                 frame.current_price + frame.atr * 0.45,
             )
-            tp1 = min(
-                existing_exits.get(OrderRole.TAKE_PROFIT_1, frame.current_price - frame.atr * 0.6),
-                frame.current_price - frame.atr * 0.3,
-            )
-            tp2 = min(
-                existing_exits.get(OrderRole.TAKE_PROFIT_2, frame.current_price - frame.atr * 1.2),
-                tp1 - frame.atr * 0.4,
-            )
+            existing_tp1 = existing_exits.get(OrderRole.TAKE_PROFIT_1)
+            existing_tp2 = existing_exits.get(OrderRole.TAKE_PROFIT_2)
+            tp1 = existing_tp1 or existing_tp2 or (frame.current_price - frame.atr * 0.6)
+            tp2 = existing_tp2 or min(tp1 - frame.atr * 0.4, frame.current_price - frame.atr * 1.2)
         return TradePlan(
             playbook=Playbook.MAGNET_FOLLOW,
             side=side,

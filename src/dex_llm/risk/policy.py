@@ -15,7 +15,6 @@ from dex_llm.models import (
 class RiskPolicy:
     def __init__(
         self,
-        max_consecutive_losses: int = 2,
         long_notional_fraction: float = 1.0,
         short_notional_fraction: float = 0.4,
         target_leverage: int = 10,
@@ -24,7 +23,6 @@ class RiskPolicy:
             raise ValueError("side notional fractions must be positive")
         if target_leverage <= 0:
             raise ValueError("target leverage must be positive")
-        self.max_consecutive_losses = max_consecutive_losses
         self.side_notional_fraction = {
             TradeSide.LONG: long_notional_fraction,
             TradeSide.SHORT: short_notional_fraction,
@@ -61,9 +59,6 @@ class RiskPolicy:
                 allowed=False,
                 reason="single-position mode blocks averaging down",
             )
-
-        if position.consecutive_losses_today >= self.max_consecutive_losses:
-            return RiskAssessment(allowed=False, reason="daily loss streak limit reached")
 
         order = self._target_order(plan)
         if order is None:

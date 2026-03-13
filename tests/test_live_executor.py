@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -18,9 +19,12 @@ from dex_llm.executor.safety import (
     build_deterministic_cloid,
     extract_role_from_cloid,
 )
+from dex_llm.features.extractor import FeatureExtractor
+from dex_llm.llm.router import HeuristicPlaybookRouter
 from dex_llm.models import (
     LiveOrderState,
     MarginMode,
+    MarketFrame,
     OrderRole,
     OrderState,
     PendingActionState,
@@ -32,6 +36,10 @@ from dex_llm.models import (
     TradePlan,
     TradeSide,
 )
+
+
+def load_sample_frame() -> MarketFrame:
+    return MarketFrame.model_validate(json.loads(Path("examples/sample_frame.json").read_text()))
 
 
 class FakeExchange:
@@ -740,7 +748,10 @@ def test_execute_plan_places_protection_after_filled_single_resting_entry() -> N
     assert receipts[0].status == OrderState.FILLED
     assert exchange.ordered[0]["sz"] == 0.12
     assert exchange.ordered[1]["order_type"]["trigger"]["tpsl"] == "tp"
+    assert exchange.ordered[1]["order_type"]["trigger"]["isMarket"] is True
     assert exchange.ordered[2]["order_type"]["trigger"]["tpsl"] == "sl"
+    stop_trigger = exchange.ordered[2]["order_type"]["trigger"]["triggerPx"]
+    assert exchange.ordered[2]["limit_px"] < stop_trigger
     assert sum(1 for receipt in receipts if receipt.action == "place") == 3
 
 
@@ -863,6 +874,311 @@ def test_execute_plan_closes_open_position_on_no_trade() -> None:
     assert exchange.market_closed[0]["sz"] == pytest.approx(0.12)
     assert any(receipt.action == "cancel" for receipt in receipts)
     assert any(receipt.action == "emergency_close" for receipt in receipts)
+
+
+def test_grouped_batch_single_error_rejects_all_receipts() -> None:
+    class RejectingExchange(FakeExchange):
+        def bulk_orders(
+            self,
+            order_requests: list[dict[str, object]],
+            builder: object | None = None,
+            grouping: str = "na",
+        ) -> dict[str, object]:
+            _ = order_requests, builder, grouping
+            return {
+                "status": "ok",
+                "response": {
+                    "type": "order",
+                    "data": {
+                        "statuses": [
+                            {"error": "Invalid TP/SL price. asset=1"},
+                        ]
+                    },
+                },
+            }
+
+    exchange = RejectingExchange()
+    validator = PreSubmitValidator(
+        {"BTC": AssetMetadata(symbol="BTC", asset_index=0, size_decimals=3, max_leverage=20.0)}
+    )
+    executor = HyperliquidExchangeExecutor(
+        base_url="https://api.hyperliquid.xyz",
+        signer_private_key="0x59c6995e998f97a5a0044966f094538b2924c92f6e7e0c0c7f3d4e3cbb0dbe4a",
+        signer_agent_address="0x0000000000000000000000000000000000000000",
+        trading_user_address="0x1111111111111111111111111111111111111111",
+        validator=validator,
+        nonce_manager=NonceManager("0xsigner", now_ms=lambda: 1_000),
+        exchange_client=exchange,
+    )
+    plan = TradePlan(
+        playbook=Playbook.MAGNET_FOLLOW,
+        side=TradeSide.LONG,
+        entry_band=(69990.0, 70010.0),
+        invalid_if=69850.0,
+        tp1=70100.0,
+        tp2=70200.0,
+        ttl_min=20,
+        reason="grouped entry",
+    )
+
+    receipts = executor.execute_plan(
+        plan=plan,
+        risk=RiskAssessment(
+            allowed=True,
+            reason="risk checks passed",
+            recommended_quantity=0.12,
+            recommended_notional=840.0,
+            risk_budget=840.0,
+        ),
+        symbol="BTC",
+        frame_timestamp=datetime(2026, 3, 13, 0, 0, tzinfo=UTC),
+        position=PositionState(),
+        best_bid=70000.0,
+        best_ask=70010.0,
+        oracle_price=70005.0,
+    )
+
+    assert len(receipts) == 3
+    assert all(receipt.status == OrderState.REJECTED for receipt in receipts)
+    assert all("Invalid TP/SL price" in receipt.message for receipt in receipts)
+
+
+def test_grouped_entry_quantizes_trigger_prices_for_eth() -> None:
+    exchange = FakeExchange()
+    validator = PreSubmitValidator(
+        {"ETH": AssetMetadata(symbol="ETH", asset_index=1, size_decimals=4, max_leverage=25.0)}
+    )
+    executor = HyperliquidExchangeExecutor(
+        base_url="https://api.hyperliquid.xyz",
+        signer_private_key="0x59c6995e998f97a5a0044966f094538b2924c92f6e7e0c0c7f3d4e3cbb0dbe4a",
+        signer_agent_address="0x0000000000000000000000000000000000000000",
+        trading_user_address="0x1111111111111111111111111111111111111111",
+        validator=validator,
+        nonce_manager=NonceManager("0xsigner", now_ms=lambda: 1_000),
+        exchange_client=exchange,
+    )
+    plan = TradePlan(
+        playbook=Playbook.SWEEP_RECLAIM,
+        side=TradeSide.SHORT,
+        entry_band=(2182.802, 2183.53),
+        invalid_if=2184.1400000000003,
+        tp1=2179.89,
+        tp2=2176.53,
+        ttl_min=12,
+        reason="quantize child triggers",
+    )
+
+    receipts = executor.execute_plan(
+        plan=plan,
+        risk=RiskAssessment(
+            allowed=True,
+            reason="risk checks passed",
+            recommended_quantity=0.5,
+            recommended_notional=1091.5,
+            risk_budget=1091.5,
+        ),
+        symbol="ETH",
+        frame_timestamp=datetime(2026, 3, 13, 0, 0, tzinfo=UTC),
+        position=PositionState(),
+        best_bid=2182.8,
+        best_ask=2183.0,
+        oracle_price=2182.9,
+    )
+
+    assert len(receipts) == 3
+    tp_trigger = exchange.ordered[1]["order_type"]["trigger"]["triggerPx"]
+    sl_trigger = exchange.ordered[2]["order_type"]["trigger"]["triggerPx"]
+    assert tp_trigger == 2176.5
+    assert sl_trigger == 2184.1
+    assert exchange.ordered[2]["limit_px"] > sl_trigger
+
+
+def test_execute_plan_omits_stop_loss_when_disabled() -> None:
+    exchange = FakeExchange()
+    validator = PreSubmitValidator(
+        {"BTC": AssetMetadata(symbol="BTC", asset_index=0, size_decimals=3, max_leverage=20.0)}
+    )
+    executor = HyperliquidExchangeExecutor(
+        base_url="https://api.hyperliquid.xyz",
+        signer_private_key="0x59c6995e998f97a5a0044966f094538b2924c92f6e7e0c0c7f3d4e3cbb0dbe4a",
+        signer_agent_address="0x0000000000000000000000000000000000000000",
+        trading_user_address="0x1111111111111111111111111111111111111111",
+        validator=validator,
+        nonce_manager=NonceManager("0xsigner", now_ms=lambda: 1_000),
+        exchange_client=exchange,
+        enable_stop_loss=False,
+    )
+    plan = TradePlan(
+        playbook=Playbook.MAGNET_FOLLOW,
+        side=TradeSide.LONG,
+        entry_band=(70000.0, 70010.0),
+        invalid_if=69900.0,
+        tp1=70100.0,
+        tp2=70200.0,
+        ttl_min=12,
+        reason="stop loss disabled",
+    )
+
+    receipts = executor.execute_plan(
+        plan=plan,
+        risk=RiskAssessment(
+            allowed=True,
+            reason="risk checks passed",
+            recommended_quantity=0.12,
+            recommended_notional=840.0,
+            risk_budget=840.0,
+        ),
+        symbol="BTC",
+        frame_timestamp=datetime(2026, 3, 13, 0, 0, tzinfo=UTC),
+        position=PositionState(),
+        best_bid=70000.0,
+        best_ask=70010.0,
+        oracle_price=70005.0,
+    )
+
+    assert exchange.bulk_groupings == ["normalTpsl"]
+    assert len(exchange.ordered) == 2
+    assert all(
+        order["order_type"].get("trigger", {}).get("tpsl") != "sl"
+        for order in exchange.ordered
+    )
+    assert len(receipts) == 2
+
+
+def test_execute_plan_uses_live_position_size_for_exit_updates() -> None:
+    exchange = FakeExchange()
+    validator = PreSubmitValidator(
+        {"ETH": AssetMetadata(symbol="ETH", asset_index=1, size_decimals=4, max_leverage=25.0)}
+    )
+    executor = HyperliquidExchangeExecutor(
+        base_url="https://api.hyperliquid.xyz",
+        signer_private_key="0x59c6995e998f97a5a0044966f094538b2924c92f6e7e0c0c7f3d4e3cbb0dbe4a",
+        signer_agent_address="0x0000000000000000000000000000000000000000",
+        trading_user_address="0x1111111111111111111111111111111111111111",
+        validator=validator,
+        nonce_manager=NonceManager("0xsigner", now_ms=lambda: 1_000),
+        exchange_client=exchange,
+        enable_stop_loss=False,
+    )
+    plan = TradePlan(
+        playbook=Playbook.MAGNET_FOLLOW,
+        side=TradeSide.SHORT,
+        entry_band=(2186.95, 2188.95),
+        invalid_if=2189.975,
+        tp1=2185.25,
+        tp2=2176.6,
+        ttl_min=5,
+        reason="update exits for existing short",
+    )
+
+    receipts = executor.execute_plan(
+        plan=plan,
+        risk=RiskAssessment(
+            allowed=False,
+            reason="single-position mode blocks averaging down",
+            recommended_quantity=0.0,
+            recommended_notional=0.0,
+            risk_budget=0.0,
+        ),
+        symbol="ETH",
+        frame_timestamp=datetime(2026, 3, 13, 0, 0, tzinfo=UTC),
+        position=PositionState(
+            side=TradeSide.SHORT,
+            quantity=1.0,
+            open_orders=1,
+            active_orders=[
+                LiveOrderState(
+                    coin="ETH",
+                    side="B",
+                    limit_price=2176.6,
+                    size=1.0,
+                    reduce_only=True,
+                    is_trigger=True,
+                    order_type="trigger",
+                    oid=1,
+                    cloid="0x22000000000000000000000000000001",
+                    status=OrderState.OPEN,
+                    role=OrderRole.TAKE_PROFIT_2,
+                    trigger_price=2176.6,
+                )
+            ],
+        ),
+        best_bid=2187.0,
+        best_ask=2187.2,
+        oracle_price=2187.1,
+    )
+
+    assert len(receipts) == 1
+    assert receipts[0].action == "keep"
+    assert receipts[0].decision == ReconciliationDecision.KEEP
+
+
+def test_cancel_receipt_marks_missing_order_as_canceled() -> None:
+    exchange = FakeExchange()
+    validator = PreSubmitValidator(
+        {"ETH": AssetMetadata(symbol="ETH", asset_index=1, size_decimals=4, max_leverage=25.0)}
+    )
+    executor = HyperliquidExchangeExecutor(
+        base_url="https://api.hyperliquid.xyz",
+        signer_private_key="0x59c6995e998f97a5a0044966f094538b2924c92f6e7e0c0c7f3d4e3cbb0dbe4a",
+        signer_agent_address="0x0000000000000000000000000000000000000000",
+        trading_user_address="0x1111111111111111111111111111111111111111",
+        validator=validator,
+        nonce_manager=NonceManager("0xsigner", now_ms=lambda: 1_000),
+        exchange_client=exchange,
+    )
+    receipt = executor._receipt_from_response(
+        symbol="ETH",
+        cloid="0xdeadbeefdeadbeefdeadbeefdeadbe",
+        action="cancel",
+        decision=ReconciliationDecision.CANCEL,
+        response={
+            "status": "ok",
+            "response": {
+                "type": "cancel",
+                "data": {
+                    "statuses": [
+                        {
+                            "error": "Order was never placed, already canceled, or filled. asset=1"
+                        }
+                    ]
+                },
+            },
+        },
+    )
+
+    assert receipt.success is True
+    assert receipt.status == OrderState.CANCELED
+
+
+def test_manage_open_position_preserves_existing_take_profit_levels() -> None:
+    frame = load_sample_frame()
+    frame.position = PositionState(
+        side=TradeSide.SHORT,
+        quantity=1.0,
+        active_orders=[
+            LiveOrderState(
+                coin=frame.symbol,
+                side="B",
+                limit_price=2176.6,
+                size=1.0,
+                reduce_only=True,
+                is_trigger=True,
+                order_type="trigger",
+                oid=1,
+                cloid="0x22000000000000000000000000000001",
+                status=OrderState.OPEN,
+                role=OrderRole.TAKE_PROFIT_2,
+                trigger_price=2176.6,
+            )
+        ],
+    )
+
+    plan = HeuristicPlaybookRouter().route(frame, FeatureExtractor().extract(frame))
+
+    assert plan.side == TradeSide.SHORT
+    assert plan.tp1 == 2176.6
+    assert plan.tp2 == 2176.6
 
 
 def test_exchange_executor_skips_dead_man_switch_for_resting_entries() -> None:

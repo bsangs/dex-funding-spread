@@ -204,7 +204,7 @@ class PreSubmitValidator:
         *,
         max_price_deviation_bps: float = 500.0,
         min_notional: float = 10.0,
-        leverage_buffer_fraction: float = 0.05,
+        leverage_buffer_fraction: float = 0.0,
     ) -> None:
         self.asset_metadata = asset_metadata or {}
         self.max_price_deviation_bps = max_price_deviation_bps

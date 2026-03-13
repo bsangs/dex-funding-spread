@@ -172,7 +172,7 @@ def test_bot_runtime_expires_resting_order_when_touch_window_passes() -> None:
     assert "invalidated" in effective.reason or "expired" in effective.reason
 
 
-def test_bot_runtime_raises_when_live_leverage_preflight_is_invalid() -> None:
+def test_bot_runtime_returns_receipt_when_live_leverage_preflight_is_invalid() -> None:
     runtime = object.__new__(BotRuntime)
     runtime.live = True
     runtime.symbol = "ETH"
@@ -200,48 +200,50 @@ def test_bot_runtime_raises_when_live_leverage_preflight_is_invalid() -> None:
 
     runtime.executor = StubExecutor()
 
-    try:
-        runtime._sync_orders(
-            snapshot=type(
-                "Snapshot",
-                (),
-                {
-                    "order_book": type(
-                        "Book",
-                        (),
-                        {
-                            "best_bid": 2100.0,
-                            "best_ask": 2101.0,
-                        },
-                    )(),
-                    "active_asset_ctx": type("Ctx", (), {"oracle_price": 2100.5})(),
-                    "captured_at": datetime.now(tz=UTC),
-                },
-            )(),
-            position=PositionState(),
-            account=AccountState(equity=200.0, available_margin=200.0, max_leverage=10.0),
-            plan=TradePlan(
-                playbook=Playbook.SWEEP_RECLAIM,
-                side=TradeSide.SHORT,
-                entry_band=(2099.0, 2100.0),
-                invalid_if=2105.0,
-                tp1=2090.0,
-                tp2=2080.0,
-                ttl_min=12,
-                reason="test",
-            ),
-            risk=RiskAssessment(
-                allowed=True,
-                reason="ok",
-                recommended_quantity=0.1,
-                recommended_notional=100.0,
-                risk_budget=1.0,
-            ),
-        )
-    except RuntimeError as exc:
-        assert "leverage preflight update failed" in str(exc)
-    else:
-        raise AssertionError("expected leverage preflight failure to raise")
+    receipts, leverage_preflight = runtime._sync_orders(
+        snapshot=type(
+            "Snapshot",
+            (),
+            {
+                "order_book": type(
+                    "Book",
+                    (),
+                    {
+                        "best_bid": 2100.0,
+                        "best_ask": 2101.0,
+                    },
+                )(),
+                "active_asset_ctx": type("Ctx", (), {"oracle_price": 2100.5})(),
+                "captured_at": datetime.now(tz=UTC),
+            },
+        )(),
+        position=PositionState(),
+        account=AccountState(equity=200.0, available_margin=200.0, max_leverage=10.0),
+        plan=TradePlan(
+            playbook=Playbook.SWEEP_RECLAIM,
+            side=TradeSide.SHORT,
+            entry_band=(2099.0, 2100.0),
+            invalid_if=2105.0,
+            tp1=2090.0,
+            tp2=2080.0,
+            ttl_min=12,
+            reason="test",
+        ),
+        risk=RiskAssessment(
+            allowed=True,
+            reason="ok",
+            recommended_quantity=0.1,
+            recommended_notional=100.0,
+            risk_budget=1.0,
+        ),
+    )
+
+    assert leverage_preflight is not None
+    assert leverage_preflight["valid"] is False
+    assert "leverage preflight update failed" in leverage_preflight["reason"]
+    assert len(receipts) == 1
+    assert receipts[0]["action"] == "leverage_preflight"
+    assert receipts[0]["status"] == "rejected"
 
 
 def test_bot_runtime_only_refreshes_after_strategy_interval() -> None:

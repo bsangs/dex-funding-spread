@@ -82,7 +82,6 @@ def _build_kill_switch_policy(settings: AppSettings) -> KillSwitchPolicy:
         max_info_latency_ms=settings.kill_switch_max_info_latency_ms,
         max_private_latency_ms=settings.kill_switch_max_private_latency_ms,
         max_data_age_ms=settings.kill_switch_max_data_age_ms,
-        max_consecutive_losses=settings.kill_switch_max_consecutive_losses,
     )
 
 
@@ -365,6 +364,7 @@ def _build_executor(
         ambiguous_resolver=resolver,
         margin_mode=settings.margin_mode,
         target_leverage=settings.target_leverage,
+        enable_stop_loss=settings.enable_stop_loss,
     )
 
 
@@ -378,7 +378,6 @@ def inspect(
     extractor = FeatureExtractor()
     router = HeuristicPlaybookRouter()
     risk_policy = RiskPolicy(
-        max_consecutive_losses=settings.kill_switch_max_consecutive_losses,
         long_notional_fraction=settings.long_notional_fraction,
         short_notional_fraction=settings.short_notional_fraction,
         target_leverage=settings.target_leverage,
@@ -545,7 +544,6 @@ def route_live(
         max_leverage=settings.max_leverage,
     )
     risk = RiskPolicy(
-        max_consecutive_losses=settings.kill_switch_max_consecutive_losses,
         long_notional_fraction=settings.long_notional_fraction,
         short_notional_fraction=settings.short_notional_fraction,
         target_leverage=settings.target_leverage,
@@ -632,7 +630,6 @@ def execute_live(
         max_leverage=settings.max_leverage,
     )
     risk = RiskPolicy(
-        max_consecutive_losses=settings.kill_switch_max_consecutive_losses,
         long_notional_fraction=settings.long_notional_fraction,
         short_notional_fraction=settings.short_notional_fraction,
         target_leverage=settings.target_leverage,
@@ -767,7 +764,6 @@ def run_bot(
         ws_client=ws_client,
         executor=executor,
         risk_policy=RiskPolicy(
-            max_consecutive_losses=settings.kill_switch_max_consecutive_losses,
             long_notional_fraction=settings.long_notional_fraction,
             short_notional_fraction=settings.short_notional_fraction,
             target_leverage=settings.target_leverage,
@@ -778,6 +774,7 @@ def run_bot(
         live=live,
         execution_mode_live=settings.execution_mode == ExecutionMode.LIVE,
         dex=settings.hyperliquid_dex,
+        enable_stop_loss=settings.enable_stop_loss,
         console=console,
     )
     runtime.run(max_cycles=max_cycles)

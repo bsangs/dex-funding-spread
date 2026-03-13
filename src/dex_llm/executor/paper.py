@@ -78,11 +78,12 @@ class PaperOpenPosition:
 
 
 class PaperBroker:
-    def __init__(self) -> None:
+    def __init__(self, *, enable_stop_loss: bool = True) -> None:
         self.pending_entries: list[PaperPendingEntry] = []
         self.position: PaperOpenPosition | None = None
         self.realized_pnl = 0.0
         self.outcomes: list[TradeOutcome] = []
+        self.enable_stop_loss = enable_stop_loss
 
     def sync_plan(
         self,
@@ -401,7 +402,11 @@ class PaperBroker:
         position = self.position
         receipts: list[ExecutionReceipt] = []
         _ = price_candle
-        stop_hit = self._stop_triggered(position, best_bid=best_bid, best_ask=best_ask)
+        stop_hit = self.enable_stop_loss and self._stop_triggered(
+            position,
+            best_bid=best_bid,
+            best_ask=best_ask,
+        )
         if stop_hit:
             pnl = self._close_position(
                 position,
