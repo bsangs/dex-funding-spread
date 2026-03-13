@@ -69,6 +69,8 @@ class HyperliquidExchangeExecutor:
         keep_size_tolerance_fraction: float = 0.001,
         margin_mode: MarginMode = MarginMode.ISOLATED,
         target_leverage: int = 10,
+        long_target_leverage: int | None = None,
+        short_target_leverage: int | None = None,
         enable_stop_loss: bool = True,
     ) -> None:
         self.wallet = Account.from_key(signer_private_key)
@@ -88,6 +90,8 @@ class HyperliquidExchangeExecutor:
         self.keep_size_tolerance_fraction = keep_size_tolerance_fraction
         self.margin_mode = margin_mode
         self.target_leverage = target_leverage
+        self.long_target_leverage = long_target_leverage or target_leverage
+        self.short_target_leverage = short_target_leverage or target_leverage
         self.enable_stop_loss = enable_stop_loss
         self._grouped_entry_cloids: set[str] = set()
 
@@ -95,6 +99,11 @@ class HyperliquidExchangeExecutor:
         derived = self.wallet.address.lower()
         if derived != self.signer_agent_address:
             raise ValueError("signer_agent_address does not match signer_private_key")
+
+    def target_leverage_for_side(self, side: TradeSide) -> int:
+        if side == TradeSide.SHORT:
+            return self.short_target_leverage
+        return self.long_target_leverage
 
     def seed_nonce(self, reference_ms: int | None = None) -> int:
         return self.nonce_manager.seed(reference_ms)

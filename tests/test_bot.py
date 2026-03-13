@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 from dex_llm.bot import BotRuntime, StrategyState
 from dex_llm.models import (
     AccountState,
     FeatureSnapshot,
     HyperliquidUserFill,
+    MarketFrame,
     Playbook,
     PositionState,
     RestingOrderPlan,
@@ -183,6 +186,9 @@ def test_bot_runtime_returns_receipt_when_live_leverage_preflight_is_invalid() -
 
         def build_orders_from_plan(self, **_: object) -> list[object]:
             return [type("Order", (), {"reduce_only": False})()]
+
+        def target_leverage_for_side(self, _: TradeSide) -> int:
+            return self.target_leverage
 
         def apply_leverage_preflight(self, **_: object) -> RiskAssessment:
             return type(
@@ -369,3 +375,48 @@ def test_bot_runtime_waits_for_next_review_after_recent_fill() -> None:
 
     assert effective.playbook == Playbook.NO_TRADE
     assert "recent fill" in effective.reason
+
+
+def test_bot_runtime_skips_router_when_position_is_open() -> None:
+    runtime = object.__new__(BotRuntime)
+    runtime.heatmap_params = {}
+    runtime.allow_synthetic = False
+    runtime._strategy_state = None
+
+    class StubBuilder:
+        def build_from_snapshot(self, *_: object, **__: object) -> MarketFrame:
+            frame = MarketFrame.model_validate(
+                json.loads(Path("examples/sample_frame.json").read_text())
+            )
+            return frame.model_copy(
+                update={"position": PositionState(side=TradeSide.SHORT, quantity=1.0)}
+            )
+
+    class StubRouter:
+        def route(self, *_: object, **__: object) -> TradePlan:
+            raise AssertionError("router should not be called for open-position management")
+
+    class StubRiskPolicy:
+        def assess(self, *_: object, **__: object) -> RiskAssessment:
+            return RiskAssessment(
+                allowed=False,
+                reason="single-position mode blocks averaging down",
+            )
+
+    runtime.builder = StubBuilder()
+    runtime.router = StubRouter()
+    runtime.risk_policy = StubRiskPolicy()
+    runtime._account_from_snapshot = lambda snapshot: AccountState(
+        equity=100.0,
+        available_margin=100.0,
+        max_leverage=20.0,
+    )
+
+    state = runtime._compute_strategy_state(
+        snapshot=object(),  # type: ignore[arg-type]
+        fills=None,
+        position=PositionState(side=TradeSide.SHORT, quantity=1.0),
+    )
+
+    assert state.plan.side == TradeSide.SHORT
+    assert "code-managed" in state.plan.reason

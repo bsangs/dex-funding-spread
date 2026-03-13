@@ -17,17 +17,21 @@ class RiskPolicy:
         self,
         long_notional_fraction: float = 1.0,
         short_notional_fraction: float = 0.4,
-        target_leverage: int = 10,
+        long_target_leverage: int = 20,
+        short_target_leverage: int = 15,
     ) -> None:
         if long_notional_fraction <= 0 or short_notional_fraction <= 0:
             raise ValueError("side notional fractions must be positive")
-        if target_leverage <= 0:
-            raise ValueError("target leverage must be positive")
+        if long_target_leverage <= 0 or short_target_leverage <= 0:
+            raise ValueError("side target leverage must be positive")
         self.side_notional_fraction = {
             TradeSide.LONG: long_notional_fraction,
             TradeSide.SHORT: short_notional_fraction,
         }
-        self.target_leverage = target_leverage
+        self.side_target_leverage = {
+            TradeSide.LONG: long_target_leverage,
+            TradeSide.SHORT: short_target_leverage,
+        }
 
     def assess(
         self,
@@ -96,7 +100,7 @@ class RiskPolicy:
         entry_price = sum(order.entry_band) / 2
         if entry_price <= 0:
             return 0.0, 0.0
-        leverage = min(account.max_leverage, float(self.target_leverage))
+        leverage = min(account.max_leverage, float(self.side_target_leverage[order.side]))
         notional = account.available_margin * leverage * self.side_notional_fraction[order.side]
         if notional <= 0:
             return 0.0, 0.0

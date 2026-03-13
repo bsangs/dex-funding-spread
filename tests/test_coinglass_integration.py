@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
 
 from dex_llm.integrations.coinglass import (
     CoinGlassFallbackHeatmapClient,
     CoinGlassHeatmapClient,
     CoinGlassLiquidationsPageClient,
+    _prune_cache_dir,
 )
 from dex_llm.models import ClusterSide, HeatmapSnapshot
 
@@ -106,3 +108,16 @@ def test_web_client_extract_symbol_context() -> None:
     )
 
     assert lines == ["BTC", "$100K", "ETH", "$200K", "SOL", "$50K"]
+
+
+def test_prune_cache_dir_keeps_only_latest_ten_files(tmp_path: Path) -> None:
+    for index in range(12):
+        path = tmp_path / f"coinglass-eth-20260314T120{index:02d}Z.json"
+        path.write_text("{}", encoding="utf-8")
+
+    _prune_cache_dir(tmp_path)
+
+    remaining = sorted(path.name for path in tmp_path.iterdir())
+    assert len(remaining) == 10
+    assert remaining[0] == "coinglass-eth-20260314T12002Z.json"
+    assert remaining[-1] == "coinglass-eth-20260314T12011Z.json"

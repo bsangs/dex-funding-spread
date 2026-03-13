@@ -19,14 +19,12 @@ def build_router_payload(
     return {
         "exchange": frame.exchange,
         "symbol": frame.symbol,
-        "current_price": frame.current_price,
         "atr": frame.atr,
         "map_quality": frame.map_quality.value,
         "heatmap_path": frame.heatmap_path,
         "heatmap_image_path": frame.heatmap_image_path,
         "heatmap_image_url": frame.heatmap_image_url,
         "sweep": frame.sweep.model_dump(mode="json"),
-        "position": _position_payload(frame),
         "kill_switch": frame.kill_switch.model_dump(mode="json"),
         "top_clusters_above": [
             cluster.model_dump(mode="json") for cluster in frame.clusters_above[:3]
@@ -136,43 +134,3 @@ def _build_image_input(
             "detail": image_detail,
         }
     return None
-
-
-def _position_payload(frame: MarketFrame) -> dict[str, object]:
-    position = frame.position
-    active_entry_orders = [
-        {
-            "price": order.limit_price,
-            "side": order.side,
-            "status": order.status.value,
-        }
-        for order in position.active_orders
-        if order.coin == frame.symbol and not order.reduce_only
-    ]
-    active_exit_orders = [
-        {
-            "role": order.role.value,
-            "price": order.trigger_price or order.limit_price,
-            "status": order.status.value,
-        }
-        for order in position.active_orders
-        if order.coin == frame.symbol and order.reduce_only
-    ]
-    payload: dict[str, object] = {
-        "side": position.side.value,
-        "has_position": position.side.value != "flat",
-        "entry_price": position.entry_price,
-        "open_orders": position.open_orders,
-        "entries_blocked_reduce_only": position.entries_blocked_reduce_only,
-        "active_entry_orders": active_entry_orders,
-        "active_exit_orders": active_exit_orders,
-    }
-    if position.last_user_event is not None:
-        payload["last_user_event"] = {
-            "event_type": position.last_user_event.event_type.value,
-            "reason": position.last_user_event.reason,
-            "timestamp": position.last_user_event.timestamp.isoformat()
-            if position.last_user_event.timestamp is not None
-            else None,
-        }
-    return payload

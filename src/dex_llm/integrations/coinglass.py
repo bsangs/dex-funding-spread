@@ -17,6 +17,8 @@ from playwright.sync_api import (
 
 from dex_llm.models import Cluster, ClusterShape, ClusterSide, HeatmapSnapshot
 
+MAX_HEATMAP_CACHE_FILES = 10
+
 
 class CoinGlassHeatmapClient:
     def __init__(
@@ -183,6 +185,7 @@ class CoinGlassHeatmapClient:
         stamp = datetime.now(tz=UTC).strftime("%Y%m%dT%H%M%SZ")
         path = raw_dir / f"coinglass-{symbol.lower()}-{stamp}.json"
         path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
+        _prune_cache_dir(raw_dir)
         return str(path)
 
     def _download_image(self, symbol: str, image_url: str) -> str:
@@ -195,6 +198,7 @@ class CoinGlassHeatmapClient:
         with self._client.stream("GET", image_url) as response:
             response.raise_for_status()
             path.write_bytes(response.read())
+        _prune_cache_dir(images_dir)
         return str(path)
 
     def _shape_from_orders(self, orders: int) -> ClusterShape:
@@ -326,6 +330,7 @@ class CoinGlassLiquidationsPageClient:
         stamp = captured_at.strftime("%Y%m%dT%H%M%SZ")
         path = images_dir / f"coinglass-web-{symbol.lower()}-{stamp}.png"
         page.screenshot(path=str(path), full_page=True)
+        _prune_cache_dir(images_dir)
         return str(path)
 
     def _write_raw_payload(
@@ -340,6 +345,7 @@ class CoinGlassLiquidationsPageClient:
         stamp = datetime.now(tz=UTC).strftime("%Y%m%dT%H%M%SZ")
         path = raw_dir / f"{prefix}-{symbol.lower()}-{stamp}.json"
         path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
+        _prune_cache_dir(raw_dir)
         return str(path)
 
     @staticmethod
@@ -397,3 +403,13 @@ class CoinGlassFallbackHeatmapClient:
         if last_error is not None:
             snapshot.metadata["api_error"] = str(last_error)
         return snapshot
+
+
+def _prune_cache_dir(directory: Path, *, keep_latest: int = MAX_HEATMAP_CACHE_FILES) -> None:
+    files = sorted(
+        (path for path in directory.iterdir() if path.is_file()),
+        key=lambda path: path.name,
+        reverse=True,
+    )
+    for stale_path in files[keep_latest:]:
+        stale_path.unlink(missing_ok=True)

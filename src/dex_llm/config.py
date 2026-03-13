@@ -51,9 +51,10 @@ class AppSettings(BaseSettings):
     enable_stop_loss: bool = False
     execution_mode: ExecutionMode = ExecutionMode.PAPER
     margin_mode: MarginMode = MarginMode.ISOLATED
-    target_leverage: int = 10
+    long_target_leverage: int = 20
+    short_target_leverage: int = 15
     base_leverage: float = 6.0
-    max_leverage: float = 10.0
+    max_leverage: float = 20.0
     max_price_deviation_bps: float = 500.0
     openai_image_detail: str = "auto"
     clock_drift_limit_ms: float = 500.0

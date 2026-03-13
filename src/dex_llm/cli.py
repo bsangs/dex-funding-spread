@@ -369,7 +369,9 @@ def _build_executor(
         vault_address=settings.hyperliquid_vault_address,
         ambiguous_resolver=resolver,
         margin_mode=settings.margin_mode,
-        target_leverage=settings.target_leverage,
+        target_leverage=settings.long_target_leverage,
+        long_target_leverage=settings.long_target_leverage,
+        short_target_leverage=settings.short_target_leverage,
         enable_stop_loss=settings.enable_stop_loss,
     )
 
@@ -386,7 +388,8 @@ def inspect(
     risk_policy = RiskPolicy(
         long_notional_fraction=settings.long_notional_fraction,
         short_notional_fraction=settings.short_notional_fraction,
-        target_leverage=settings.target_leverage,
+        long_target_leverage=settings.long_target_leverage,
+        short_target_leverage=settings.short_target_leverage,
     )
     account = AccountState(
         equity=equity,
@@ -552,7 +555,8 @@ def route_live(
     risk = RiskPolicy(
         long_notional_fraction=settings.long_notional_fraction,
         short_notional_fraction=settings.short_notional_fraction,
-        target_leverage=settings.target_leverage,
+        long_target_leverage=settings.long_target_leverage,
+        short_target_leverage=settings.short_target_leverage,
     ).assess(plan, account, frame.position, frame.kill_switch)
     console.print_json(
         json.dumps(
@@ -638,7 +642,8 @@ def execute_live(
     risk = RiskPolicy(
         long_notional_fraction=settings.long_notional_fraction,
         short_notional_fraction=settings.short_notional_fraction,
-        target_leverage=settings.target_leverage,
+        long_target_leverage=settings.long_target_leverage,
+        short_target_leverage=settings.short_target_leverage,
     ).assess(plan, account, frame.position, frame.kill_switch)
     payload: dict[str, object] = {
         "frame": frame.model_dump(mode="json"),
@@ -671,7 +676,7 @@ def execute_live(
         executor.verify_signer()
         leverage_preflight = executor.apply_leverage_preflight(
             symbol=symbol,
-            target_leverage=settings.target_leverage,
+            target_leverage=executor.target_leverage_for_side(plan.side),
             margin_mode=settings.margin_mode,
             current_leverage=frame.position.live_leverage,
             max_leverage=account.max_leverage,
@@ -772,7 +777,8 @@ def run_bot(
         risk_policy=RiskPolicy(
             long_notional_fraction=settings.long_notional_fraction,
             short_notional_fraction=settings.short_notional_fraction,
-            target_leverage=settings.target_leverage,
+            long_target_leverage=settings.long_target_leverage,
+            short_target_leverage=settings.short_target_leverage,
         ),
         max_leverage=settings.max_leverage,
         strategy_interval_s=strategy_interval_s or settings.bot_strategy_interval_s,

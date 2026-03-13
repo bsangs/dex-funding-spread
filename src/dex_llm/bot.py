@@ -241,17 +241,20 @@ class BotRuntime:
         frame = frame.model_copy(update={"position": position})
         features = FeatureExtractor().extract(frame)
         previous_plan = self._strategy_state.plan if self._strategy_state is not None else None
-        plan = self.router.route(
-            frame,
-            features,
-            previous_plan=previous_plan,
-        )
-        if previous_plan is not None:
-            plan = self._stabilize_plan(
-                frame=frame,
+        if position.side != TradeSide.FLAT:
+            plan = self._position_management_plan(frame=frame, previous_plan=previous_plan)
+        else:
+            plan = self.router.route(
+                frame,
+                features,
                 previous_plan=previous_plan,
-                candidate_plan=plan,
             )
+            if previous_plan is not None:
+                plan = self._stabilize_plan(
+                    frame=frame,
+                    previous_plan=previous_plan,
+                    candidate_plan=plan,
+                )
         account = self._account_from_snapshot(snapshot)
         risk = self.risk_policy.assess(plan, account, position, frame.kill_switch)
         return StrategyState(
@@ -347,6 +350,45 @@ class BotRuntime:
             )
         return candidate_plan
 
+    @staticmethod
+    def _position_management_plan(
+        *,
+        frame: MarketFrame,
+        previous_plan: TradePlan | None,
+    ) -> TradePlan:
+        side = frame.position.side
+        if (
+            previous_plan is not None
+            and previous_plan.playbook != Playbook.NO_TRADE
+            and previous_plan.side == side
+        ):
+            return previous_plan.model_copy(
+                update={"reason": "code-managed open position keeps the existing take-profit plan"}
+            )
+
+        default_tp = (
+            frame.current_price + frame.atr
+            if side == TradeSide.LONG
+            else frame.current_price - frame.atr
+        )
+        invalid_if = (
+            frame.current_price - frame.atr * 0.25
+            if side == TradeSide.LONG
+            else frame.current_price + frame.atr * 0.25
+        )
+        return TradePlan(
+            playbook=Playbook.MAGNET_FOLLOW,
+            side=side,
+            entry_band=(frame.current_price, frame.current_price),
+            invalid_if=invalid_if,
+            tp1=default_tp,
+            tp2=default_tp,
+            ttl_min=5,
+            reason="code-managed open position uses fallback take-profit placeholders only",
+            touch_confidence=1.0,
+            expected_touch_minutes=5,
+        )
+
     def _sync_orders(
         self,
         *,
@@ -411,7 +453,7 @@ class BotRuntime:
         if self.live and needs_entry_work and position.side == TradeSide.FLAT:
             leverage_result = self.executor.apply_leverage_preflight(
                 symbol=self.symbol,
-                target_leverage=self.executor.target_leverage,
+                target_leverage=self.executor.target_leverage_for_side(plan.side),
                 margin_mode=self.executor.margin_mode,
                 current_leverage=position.live_leverage,
                 max_leverage=account.max_leverage,
