@@ -350,6 +350,8 @@ class RestingOrderPlan(BaseModel):
     ttl_min: int
     reason: str
     cluster_price: float | None = None
+    touch_confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    expected_touch_minutes: int | None = Field(default=None, ge=1)
 
     @model_validator(mode="after")
     def validate_band(self) -> RestingOrderPlan:
@@ -369,6 +371,8 @@ class TradePlan(BaseModel):
     tp2: float
     ttl_min: int
     reason: str
+    touch_confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    expected_touch_minutes: int | None = Field(default=None, ge=1)
     resting_orders: list[RestingOrderPlan] = Field(default_factory=list)
 
     @model_validator(mode="after")

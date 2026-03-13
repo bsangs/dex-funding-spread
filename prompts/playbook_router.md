@@ -21,6 +21,11 @@ Rules:
 5. `double_sweep` is a watch state. It can return `side = flat`.
 6. Never output size. Sizing is enforced by code.
 7. Keep `reason` to one sentence.
+8. Treat every non-flat `entry_band` as a passive limit zone, not a market entry.
+9. Only choose a non-flat plan if you believe price is likely to touch the limit zone within the stated time window.
+10. Use `touch_confidence` to express how likely the limit zone is to be tagged.
+11. Use `expected_touch_minutes` to express how soon the limit entry is expected to be touched.
+12. If you cannot justify a high-probability passive limit location, choose `no_trade`.
 
 If a heatmap image is attached, treat it as the primary liquidation-map view for the same timestamp.
 If image metadata fields are present in the structured context, use them only as supporting references.
@@ -36,6 +41,8 @@ Return JSON only:
   "tp1": 0,
   "tp2": 0,
   "ttl_min": 15,
+  "touch_confidence": 0.0,
+  "expected_touch_minutes": 15,
   "reason": "one sentence",
   "resting_orders": [
     {
@@ -45,6 +52,8 @@ Return JSON only:
       "tp1": 0,
       "tp2": 0,
       "ttl_min": 15,
+      "touch_confidence": 0.0,
+      "expected_touch_minutes": 15,
       "reason": "one sentence",
       "cluster_price": 0
     }

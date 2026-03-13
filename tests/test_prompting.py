@@ -46,6 +46,7 @@ def test_router_input_prefers_local_heatmap_image(tmp_path: Path) -> None:
     assert isinstance(content, list)
     assert content[1]["type"] == "input_image"
     assert str(content[1]["image_url"]).startswith("data:image/png;base64,")
+    assert "passive limit zone" in str(content[0]["text"])
 
 
 def test_router_input_falls_back_to_remote_heatmap_url() -> None:

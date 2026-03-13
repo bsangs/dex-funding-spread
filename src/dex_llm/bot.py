@@ -268,6 +268,7 @@ class BotRuntime:
                 order
                 for order in plan.resting_orders
                 if not self._resting_order_invalidated(order, current_price)
+                and not self._resting_order_expired(order, strategy_state.updated_at, now)
             ]
             if not active_resting_orders:
                 return self._flat_plan("all resting entries invalidated before fill")
@@ -280,7 +281,8 @@ class BotRuntime:
                 )
             return plan
         age_s = (now - strategy_state.updated_at).total_seconds()
-        if age_s >= plan.ttl_min * 60:
+        expiry_minutes = plan.expected_touch_minutes or plan.ttl_min
+        if age_s >= expiry_minutes * 60:
             return self._flat_plan("directional entry expired before fill")
         if self._directional_entry_invalidated(plan, current_price):
             return self._flat_plan("directional entry invalidated before fill")
@@ -342,16 +344,7 @@ class BotRuntime:
             )
             leverage_preflight = leverage_result.model_dump(mode="json")
             if not leverage_result.valid:
-                receipts = self.executor.reconcile_orders(
-                    symbol=self.symbol,
-                    desired_orders=[],
-                    current_orders=position.active_orders,
-                    current_position_size=0.0,
-                    best_bid=best_bid,
-                    best_ask=best_ask,
-                    oracle_price=oracle_price,
-                )
-                return [receipt.model_dump(mode="json") for receipt in receipts], leverage_preflight
+                raise RuntimeError(leverage_result.reason)
 
         receipts = self.executor.execute_plan(
             plan=plan,
@@ -534,6 +527,16 @@ class BotRuntime:
         if order.side == TradeSide.LONG:
             return current_price <= order.invalid_if
         return current_price >= order.invalid_if
+
+    @staticmethod
+    def _resting_order_expired(
+        order: RestingOrderPlan,
+        updated_at: datetime,
+        now: datetime,
+    ) -> bool:
+        if order.expected_touch_minutes is None:
+            return False
+        return (now - updated_at).total_seconds() >= order.expected_touch_minutes * 60
 
     @staticmethod
     def _directional_entry_invalidated(plan: TradePlan, current_price: float) -> bool:

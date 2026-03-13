@@ -89,6 +89,8 @@ class HeuristicPlaybookRouter:
                 tp2=top_cluster.price,
                 ttl_min=20,
                 reason="upside cluster dominates and sits behind a clean vacuum",
+                touch_confidence=0.72,
+                expected_touch_minutes=20,
             )
 
         top_cluster = max(frame.clusters_below, key=lambda cluster: cluster.size)
@@ -104,6 +106,8 @@ class HeuristicPlaybookRouter:
             tp2=top_cluster.price,
             ttl_min=20,
             reason="downside cluster dominates and sits behind a clean vacuum",
+            touch_confidence=0.72,
+            expected_touch_minutes=20,
         )
 
     def _sweep_reclaim(self, frame: MarketFrame) -> TradePlan:
@@ -123,6 +127,8 @@ class HeuristicPlaybookRouter:
                 tp2=frame.current_price - frame.atr * 1.2,
                 ttl_min=12,
                 reason="price swept the upper cluster and reclaimed back inside the prior range",
+                touch_confidence=0.82,
+                expected_touch_minutes=12,
             )
 
         if frame.sweep.cluster_price is None:
@@ -140,6 +146,8 @@ class HeuristicPlaybookRouter:
             tp2=frame.current_price + frame.atr * 1.2,
             ttl_min=12,
             reason="price swept the lower cluster and reclaimed back inside the prior range",
+            touch_confidence=0.82,
+            expected_touch_minutes=12,
         )
 
     def _flat_plan(self, reason: str) -> TradePlan:
@@ -152,6 +160,8 @@ class HeuristicPlaybookRouter:
             tp2=0.0,
             ttl_min=0,
             reason=reason,
+            touch_confidence=0.0,
+            expected_touch_minutes=None,
         )
 
     def _cluster_fade(self, frame: MarketFrame) -> TradePlan:
@@ -171,6 +181,8 @@ class HeuristicPlaybookRouter:
             ttl_min=30,
             reason="rest a long fade at the lower liquidation wall",
             cluster_price=lower_cluster.price,
+            touch_confidence=0.68,
+            expected_touch_minutes=30,
         )
         upper_short = RestingOrderPlan(
             side=TradeSide.SHORT,
@@ -184,6 +196,8 @@ class HeuristicPlaybookRouter:
             ttl_min=30,
             reason="rest a short fade at the upper liquidation wall",
             cluster_price=upper_cluster.price,
+            touch_confidence=0.68,
+            expected_touch_minutes=30,
         )
         return TradePlan(
             playbook=Playbook.CLUSTER_FADE,
@@ -194,5 +208,7 @@ class HeuristicPlaybookRouter:
             tp2=0.0,
             ttl_min=30,
             reason="arm both upper-short and lower-long fade bands around major clusters",
+            touch_confidence=0.68,
+            expected_touch_minutes=30,
             resting_orders=[lower_long, upper_short],
         )

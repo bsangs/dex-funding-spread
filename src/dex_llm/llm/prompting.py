@@ -68,7 +68,9 @@ def build_router_input(
             "type": "input_text",
             "text": (
                 "Use the attached heatmap image when present, then classify the scene "
-                "from the structured context and return a TradePlan."
+                "from the structured context and return a TradePlan. For every non-flat "
+                "setup, choose a passive limit zone where price is likely to tag soon, "
+                "not a market entry."
             ),
         }
     ]

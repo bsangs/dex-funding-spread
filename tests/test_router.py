@@ -20,6 +20,8 @@ def test_router_prefers_magnet_follow_for_directional_vacuum_sample() -> None:
 
     assert plan.playbook == Playbook.MAGNET_FOLLOW
     assert plan.side == TradeSide.LONG
+    assert plan.touch_confidence > 0.5
+    assert plan.expected_touch_minutes == 20
 
 
 def test_router_returns_cluster_fade_only_when_clusters_are_balanced() -> None:
@@ -42,6 +44,7 @@ def test_router_returns_cluster_fade_only_when_clusters_are_balanced() -> None:
     assert plan.side == TradeSide.FLAT
     assert len(plan.resting_orders) == 2
     assert {order.side for order in plan.resting_orders} == {TradeSide.LONG, TradeSide.SHORT}
+    assert all(order.touch_confidence > 0.5 for order in plan.resting_orders)
 
 
 def test_router_prefers_double_sweep_before_cluster_fade() -> None:
