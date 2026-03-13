@@ -429,6 +429,114 @@ def test_exchange_executor_keeps_unchanged_orders() -> None:
     assert not exchange.ordered
 
 
+def test_exchange_executor_keeps_orders_within_price_and_size_tolerance() -> None:
+    exchange = FakeExchange()
+    validator = PreSubmitValidator(
+        {"BTC": AssetMetadata(symbol="BTC", asset_index=0, size_decimals=3, max_leverage=20.0)}
+    )
+    executor = HyperliquidExchangeExecutor(
+        base_url="https://api.hyperliquid.xyz",
+        signer_private_key="0x59c6995e998f97a5a0044966f094538b2924c92f6e7e0c0c7f3d4e3cbb0dbe4a",
+        signer_agent_address="0x0000000000000000000000000000000000000000",
+        trading_user_address="0x1111111111111111111111111111111111111111",
+        validator=validator,
+        nonce_manager=NonceManager("0xsigner", now_ms=lambda: 1_000),
+        exchange_client=exchange,
+    )
+    desired = DesiredOrder(
+        symbol="BTC",
+        side=TradeSide.LONG,
+        price=70010.0,
+        size=0.1000,
+        role=OrderRole.ENTRY,
+        reduce_only=False,
+        order_type={"limit": {"tif": "Gtc"}},
+        cloid="0x11111111111111111111111111111111",
+    )
+    current = LiveOrderState(
+        coin="BTC",
+        side="B",
+        limit_price=70010.8,
+        size=0.10005,
+        reduce_only=False,
+        is_trigger=False,
+        order_type="limit",
+        oid=1,
+        cloid="0x11111111111111111111111111111111",
+        status=OrderState.OPEN,
+        role=OrderRole.ENTRY,
+    )
+
+    receipts = executor.reconcile_orders(
+        symbol="BTC",
+        desired_orders=[desired],
+        current_orders=[current],
+        current_position_size=0.0,
+        best_bid=70000.0,
+        best_ask=70010.0,
+        oracle_price=70005.0,
+    )
+
+    assert len(receipts) == 1
+    assert receipts[0].decision == ReconciliationDecision.KEEP
+    assert not exchange.modified
+    assert not exchange.canceled
+    assert not exchange.ordered
+
+
+def test_exchange_executor_replaces_orders_outside_keep_tolerance() -> None:
+    exchange = FakeExchange()
+    validator = PreSubmitValidator(
+        {"BTC": AssetMetadata(symbol="BTC", asset_index=0, size_decimals=3, max_leverage=20.0)}
+    )
+    executor = HyperliquidExchangeExecutor(
+        base_url="https://api.hyperliquid.xyz",
+        signer_private_key="0x59c6995e998f97a5a0044966f094538b2924c92f6e7e0c0c7f3d4e3cbb0dbe4a",
+        signer_agent_address="0x0000000000000000000000000000000000000000",
+        trading_user_address="0x1111111111111111111111111111111111111111",
+        validator=validator,
+        nonce_manager=NonceManager("0xsigner", now_ms=lambda: 1_000),
+        exchange_client=exchange,
+    )
+    desired = DesiredOrder(
+        symbol="BTC",
+        side=TradeSide.LONG,
+        price=70010.0,
+        size=0.1000,
+        role=OrderRole.ENTRY,
+        reduce_only=False,
+        order_type={"limit": {"tif": "Gtc"}},
+        cloid="0x11111111111111111111111111111111",
+    )
+    current = LiveOrderState(
+        coin="BTC",
+        side="B",
+        limit_price=70030.0,
+        size=0.1020,
+        reduce_only=False,
+        is_trigger=False,
+        order_type="limit",
+        oid=1,
+        cloid="0x11111111111111111111111111111111",
+        status=OrderState.OPEN,
+        role=OrderRole.ENTRY,
+    )
+
+    receipts = executor.reconcile_orders(
+        symbol="BTC",
+        desired_orders=[desired],
+        current_orders=[current],
+        current_position_size=0.0,
+        best_bid=70000.0,
+        best_ask=70010.0,
+        oracle_price=70005.0,
+    )
+
+    assert any(receipt.decision == ReconciliationDecision.MODIFY for receipt in receipts)
+    assert not any(receipt.decision == ReconciliationDecision.KEEP for receipt in receipts)
+    assert exchange.modified
+
+
 def test_execute_plan_places_protection_after_filled_cluster_fade_entry() -> None:
     exchange = FilledEntryExchange()
     validator = PreSubmitValidator(

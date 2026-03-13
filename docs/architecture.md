@@ -82,5 +82,6 @@ Priority is intentionally biased toward directional clarity before balanced fade
 - live private freshness is measured from `webData3`, `orderUpdates`, `userFills`, and `userEvents`
 - synthetic heatmap fallback disables new entries
 - isolated entries must satisfy minimum liquidation gap and stop-to-liquidation buffer checks
-- cross-mode entry validation is fail-closed in v1
+- the live entry path should be treated as isolated-only in v1
+- cross-mode entry validation is fail-closed for new entries
 - `cluster_fade` keeps asymmetric risk weights and cancels the opposite resting entry after the first fill

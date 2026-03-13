@@ -93,7 +93,8 @@ uv run dex-llm execute-live ETH --user-address 0x... --live
 
 ## Safety notes
 
-- cross-mode entry validation is intentionally fail-closed in v1
+- the live entry path is effectively isolated-only in v1
+- cross-mode entry validation is intentionally fail-closed and should be treated as unsupported for new entries
 - isolated entries must pass both minimum liquidation gap and stop-to-liquidation buffer checks
 - private freshness is derived from `webData3`, `orderUpdates`, `userFills`, and `userEvents`
 - live order submission still requires `execute-live --live`
