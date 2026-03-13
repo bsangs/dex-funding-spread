@@ -40,7 +40,7 @@ class AppSettings(BaseSettings):
     heatmap_cache_dir: Path = Path("data/heatmaps")
     request_timeout_s: float = 10.0
     coinglass_scrape_timeout_s: float = 20.0
-    bot_strategy_interval_s: int = 1_800
+    bot_strategy_interval_s: int = 300
     bot_sync_interval_s: int = 120
     kill_switch_max_info_latency_ms: float = 1_500.0
     kill_switch_max_private_latency_ms: float = 1_500.0
@@ -55,8 +55,8 @@ class AppSettings(BaseSettings):
     base_leverage: float = 6.0
     max_leverage: float = 10.0
     max_price_deviation_bps: float = 500.0
-    min_liquidation_gap_pct: float = 7.0
-    max_stop_to_liq_fraction: float = 0.8
+    min_liquidation_gap_pct: float = 3.0
+    max_stop_to_liq_fraction: float = 1.2
     openai_image_detail: str = "auto"
     clock_drift_limit_ms: float = 500.0
 

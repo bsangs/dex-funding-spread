@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from decimal import ROUND_DOWN, Decimal
 from typing import Any
 
 from eth_account import Account
@@ -135,7 +136,9 @@ class HyperliquidExchangeExecutor:
                     is_cross=margin_mode == MarginMode.CROSS,
                 )
             if margin_mode == MarginMode.ISOLATED:
-                required_margin = (recommended_notional / target_leverage) * 1.1
+                required_margin = _quantize_usd_amount(
+                    (recommended_notional / target_leverage) * 1.1
+                )
                 self.exchange.update_isolated_margin(amount=required_margin, name=symbol)
         except Exception as exc:
             return ValidationResult(
@@ -997,3 +1000,7 @@ def _extract_oid(payload: Mapping[str, object]) -> int | None:
     if isinstance(order, Mapping):
         return _extract_oid(order)
     return None
+
+
+def _quantize_usd_amount(value: float) -> float:
+    return float(Decimal(str(value)).quantize(Decimal("0.000001"), rounding=ROUND_DOWN))

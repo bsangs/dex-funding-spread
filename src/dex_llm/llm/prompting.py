@@ -61,8 +61,14 @@ def build_router_input(
     template: str,
     *,
     image_detail: str = "auto",
+    policy_feedback: list[str] | None = None,
+    previous_plan: dict[str, object] | None = None,
 ) -> list[dict[str, object]]:
     payload = build_router_payload(frame, features)
+    if policy_feedback:
+        payload["policy_feedback"] = policy_feedback
+    if previous_plan is not None:
+        payload["previous_plan"] = previous_plan
     user_content: list[dict[str, object]] = [
         {
             "type": "input_text",
@@ -74,6 +80,17 @@ def build_router_input(
             ),
         }
     ]
+    if policy_feedback:
+        user_content.append(
+            {
+                "type": "input_text",
+                "text": (
+                    "Safety harness feedback:\n"
+                    + "\n".join(f"- {item}" for item in policy_feedback)
+                    + "\nRevise the plan so it satisfies these constraints, or return no_trade."
+                ),
+            }
+        )
     image_input = _build_image_input(frame, image_detail=image_detail)
     if image_input is not None:
         user_content.append(image_input)

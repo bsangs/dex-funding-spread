@@ -56,7 +56,7 @@ class BotRuntime:
         executor: HyperliquidExchangeExecutor,
         risk_policy: RiskPolicy,
         max_leverage: float,
-        strategy_interval_s: int = 1_800,
+        strategy_interval_s: int = 300,
         sync_interval_s: int = 120,
         live: bool = False,
         execution_mode_live: bool = False,
@@ -81,7 +81,7 @@ class BotRuntime:
         self.console = console or Console()
         self.paper_broker = PaperBroker()
         self._strategy_state: StrategyState | None = None
-        self._previous_position_side = TradeSide.FLAT
+        self._previous_strategy_signature: tuple[object, ...] | None = None
 
     def run(self, *, max_cycles: int | None = None) -> None:
         cycle = 0
@@ -96,7 +96,15 @@ class BotRuntime:
                 if not self.live:
                     pre_strategy_receipts = self._paper_mark_market(snapshot, cycle_started)
                 position = self._position_state(snapshot, fills)
-                refresh_strategy = self._should_refresh_strategy(cycle_started, position)
+                refresh_signature = self._strategy_refresh_signature(
+                    position=position,
+                    fills=fills or snapshot.recent_fills,
+                )
+                refresh_strategy = self._should_refresh_strategy(
+                    now=cycle_started,
+                    position=position,
+                    refresh_signature=refresh_signature,
+                )
                 if refresh_strategy:
                     self._strategy_state = self._compute_strategy_state(snapshot, fills, position)
 
@@ -148,7 +156,7 @@ class BotRuntime:
                     strategy_refreshed=refresh_strategy,
                     meta=meta,
                 )
-                self._previous_position_side = position.side
+                self._previous_strategy_signature = refresh_signature
                 if max_cycles is not None and cycle >= max_cycles:
                     break
                 sleep_for = self.sync_interval_s - (
@@ -243,12 +251,56 @@ class BotRuntime:
             updated_at=datetime.now(tz=UTC),
         )
 
-    def _should_refresh_strategy(self, now: datetime, position: PositionState) -> bool:
+    def _should_refresh_strategy(
+        self,
+        *,
+        now: datetime,
+        position: PositionState,
+        refresh_signature: tuple[object, ...],
+    ) -> bool:
         if self._strategy_state is None:
             return True
         if (now - self._strategy_state.updated_at).total_seconds() >= self.strategy_interval_s:
             return True
-        return self._previous_position_side != TradeSide.FLAT and position.side == TradeSide.FLAT
+        return self._previous_strategy_signature != refresh_signature
+
+    @staticmethod
+    def _strategy_refresh_signature(
+        *,
+        position: PositionState,
+        fills: list[object],
+    ) -> tuple[object, ...]:
+        entry_orders = tuple(
+            sorted(
+                (
+                    order.coin,
+                    order.side,
+                    round(order.limit_price, 6),
+                    round(order.size, 8),
+                    order.reduce_only,
+                    order.cloid,
+                    order.oid,
+                )
+                for order in position.active_orders
+                if not order.reduce_only
+            )
+        )
+        fill_tail = None
+        if fills:
+            last_fill = fills[-1]
+            fill_tail = (
+                getattr(last_fill, "fill_hash", None),
+                getattr(last_fill, "oid", None),
+                getattr(last_fill, "time", None),
+            )
+        return (
+            position.side,
+            round(position.quantity, 8),
+            position.open_orders,
+            entry_orders,
+            position.entries_blocked_reduce_only,
+            fill_tail,
+        )
 
     def _effective_plan(
         self,

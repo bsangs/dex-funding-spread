@@ -38,6 +38,7 @@ class FakeExchange:
         self.ordered: list[dict[str, object]] = []
         self.canceled: list[tuple[str, object]] = []
         self.expires_after: int | None = None
+        self.isolated_margin_updates: list[dict[str, object]] = []
 
     def schedule_cancel(self, deadline: int | None) -> dict[str, object]:
         self.schedule_cancel_calls.append(deadline)
@@ -55,6 +56,7 @@ class FakeExchange:
         }
 
     def update_isolated_margin(self, amount: float, name: str) -> dict[str, object]:
+        self.isolated_margin_updates.append({"amount": amount, "name": name})
         return {"status": "ok", "response": {"status": "open", "amount": amount, "name": name}}
 
     def set_expires_after(self, expires_after: int | None) -> None:
@@ -245,7 +247,9 @@ def test_pre_submit_validator_blocks_cross_entries_without_liquidation_guard() -
 
 def test_pre_submit_validator_blocks_when_stop_is_too_close_to_liquidation() -> None:
     validator = PreSubmitValidator(
-        {"ETH": AssetMetadata(symbol="ETH", asset_index=0, size_decimals=3, max_leverage=20.0)}
+        {"ETH": AssetMetadata(symbol="ETH", asset_index=0, size_decimals=3, max_leverage=20.0)},
+        min_liquidation_gap_pct=7.0,
+        max_stop_to_liq_fraction=0.8,
     )
 
     result = validator.validate_order(
@@ -279,7 +283,8 @@ def test_rate_limit_budgeter_soft_degrades_on_pressure() -> None:
 def test_apply_leverage_preflight_fails_closed_when_exchange_rejects_update() -> None:
     exchange = BrokenLeverageExchange()
     validator = PreSubmitValidator(
-        {"ETH": AssetMetadata(symbol="ETH", asset_index=1, size_decimals=4, max_leverage=25.0)}
+        {"ETH": AssetMetadata(symbol="ETH", asset_index=1, size_decimals=4, max_leverage=25.0)},
+        leverage_buffer_fraction=0.1,
     )
     executor = HyperliquidExchangeExecutor(
         base_url="https://api.hyperliquid.xyz",
@@ -303,6 +308,37 @@ def test_apply_leverage_preflight_fails_closed_when_exchange_rejects_update() ->
 
     assert result.valid is False
     assert "leverage preflight update failed" in result.reason
+
+
+def test_apply_leverage_preflight_quantizes_isolated_margin_amount() -> None:
+    exchange = FakeExchange()
+    validator = PreSubmitValidator(
+        {"ETH": AssetMetadata(symbol="ETH", asset_index=1, size_decimals=4, max_leverage=25.0)},
+        leverage_buffer_fraction=0.1,
+    )
+    executor = HyperliquidExchangeExecutor(
+        base_url="https://api.hyperliquid.xyz",
+        signer_private_key="0x59c6995e998f97a5a0044966f094538b2924c92f6e7e0c0c7f3d4e3cbb0dbe4a",
+        signer_agent_address="0x0000000000000000000000000000000000000000",
+        trading_user_address="0x1111111111111111111111111111111111111111",
+        validator=validator,
+        nonce_manager=NonceManager("0xsigner", now_ms=lambda: 1_000),
+        exchange_client=exchange,
+    )
+
+    result = executor.apply_leverage_preflight(
+        symbol="ETH",
+        target_leverage=10,
+        margin_mode=MarginMode.ISOLATED,
+        current_leverage=None,
+        max_leverage=25.0,
+        recommended_notional=693.6665364999999,
+        available_margin=200.0,
+    )
+
+    assert result.valid is True
+    assert exchange.isolated_margin_updates
+    assert exchange.isolated_margin_updates[0]["amount"] == 76.303319
 
 
 def test_ambiguous_state_resolver_prefers_order_status() -> None:

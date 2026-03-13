@@ -6,6 +6,10 @@ from dex_llm.bot import BotRuntime, StrategyState
 from dex_llm.models import (
     AccountState,
     FeatureSnapshot,
+    HyperliquidUserFill,
+    LiveOrderState,
+    OrderRole,
+    OrderState,
     Playbook,
     PositionState,
     RestingOrderPlan,
@@ -251,3 +255,133 @@ def test_bot_runtime_raises_when_live_leverage_preflight_is_invalid() -> None:
         assert "leverage preflight update failed" in str(exc)
     else:
         raise AssertionError("expected leverage preflight failure to raise")
+
+
+def test_bot_runtime_refreshes_when_entry_order_state_changes() -> None:
+    runtime = object.__new__(BotRuntime)
+    runtime._strategy_state = StrategyState(
+        frame=None,  # type: ignore[arg-type]
+        features=FeatureSnapshot(
+            dominant_cluster_side=None,
+            dominant_ratio=1.0,
+            cluster_balance_ratio=1.0,
+            closest_above_distance=None,
+            closest_below_distance=None,
+            top_above=None,
+            top_below=None,
+            sweep_reclaim_ready=False,
+            double_sweep_ready=False,
+            cluster_fade_ready=False,
+            directional_vacuum=False,
+            notes=[],
+        ),
+        plan=TradePlan(
+            playbook=Playbook.NO_TRADE,
+            side=TradeSide.FLAT,
+            entry_band=(0.0, 0.0),
+            invalid_if=0.0,
+            tp1=0.0,
+            tp2=0.0,
+            ttl_min=0,
+            reason="idle",
+        ),
+        risk=RiskAssessment(allowed=False, reason="idle"),
+        updated_at=datetime.now(tz=UTC),
+    )
+    runtime.strategy_interval_s = 300
+    runtime._previous_strategy_signature = (
+        TradeSide.FLAT,
+        0.0,
+        0,
+        (),
+        False,
+        None,
+    )
+    position = PositionState(
+        side=TradeSide.FLAT,
+        open_orders=1,
+        active_orders=[
+            LiveOrderState(
+                coin="ETH",
+                side="B",
+                limit_price=2100.0,
+                size=0.1,
+                reduce_only=False,
+                is_trigger=False,
+                order_type="limit",
+                oid=1,
+                cloid="entry-1",
+                status=OrderState.OPEN,
+                role=OrderRole.ENTRY,
+            )
+        ],
+    )
+    signature = runtime._strategy_refresh_signature(position=position, fills=[])
+
+    assert runtime._should_refresh_strategy(
+        now=datetime.now(tz=UTC),
+        position=position,
+        refresh_signature=signature,
+    )
+
+
+def test_bot_runtime_refreshes_when_fill_state_changes() -> None:
+    runtime = object.__new__(BotRuntime)
+    runtime._strategy_state = StrategyState(
+        frame=None,  # type: ignore[arg-type]
+        features=FeatureSnapshot(
+            dominant_cluster_side=None,
+            dominant_ratio=1.0,
+            cluster_balance_ratio=1.0,
+            closest_above_distance=None,
+            closest_below_distance=None,
+            top_above=None,
+            top_below=None,
+            sweep_reclaim_ready=False,
+            double_sweep_ready=False,
+            cluster_fade_ready=False,
+            directional_vacuum=False,
+            notes=[],
+        ),
+        plan=TradePlan(
+            playbook=Playbook.NO_TRADE,
+            side=TradeSide.FLAT,
+            entry_band=(0.0, 0.0),
+            invalid_if=0.0,
+            tp1=0.0,
+            tp2=0.0,
+            ttl_min=0,
+            reason="idle",
+        ),
+        risk=RiskAssessment(allowed=False, reason="idle"),
+        updated_at=datetime.now(tz=UTC),
+    )
+    runtime.strategy_interval_s = 300
+    runtime._previous_strategy_signature = (
+        TradeSide.FLAT,
+        0.0,
+        0,
+        (),
+        False,
+        None,
+    )
+    fill = HyperliquidUserFill(
+        coin="ETH",
+        closed_pnl=0.0,
+        direction="Open Long",
+        price=2100.0,
+        size=0.1,
+        time=datetime.now(tz=UTC),
+        oid=2,
+        fill_hash="fill-1",
+    )
+    signature = runtime._strategy_refresh_signature(
+        position=PositionState(),
+        fills=[fill],
+    )
+
+    assert runtime._should_refresh_strategy(
+        now=datetime.now(tz=UTC),
+        position=PositionState(),
+        refresh_signature=signature,
+    )
