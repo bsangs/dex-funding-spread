@@ -5,6 +5,8 @@ import time
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 
+from websocket import WebSocketConnectionClosedException
+
 from hyperliquid.info import Info
 from hyperliquid.utils.types import Cloid
 
@@ -191,6 +193,8 @@ class HyperliquidWsStateClient:
         timeout_s: float = 10.0,
         user_address: str | None = None,
     ) -> None:
+        self.base_url = base_url
+        self.timeout_s = timeout_s
         self.info = Info(base_url=base_url, skip_ws=False, timeout=timeout_s)
         self.user_address = user_address
         self._symbol: str | None = None
@@ -212,9 +216,36 @@ class HyperliquidWsStateClient:
 
     def close(self) -> None:
         for subscription, subscription_id in self._subscription_ids:
-            self.info.unsubscribe(subscription, subscription_id)
+            try:
+                self.info.unsubscribe(subscription, subscription_id)
+            except Exception:
+                continue
         self._subscription_ids.clear()
-        self.info.disconnect_websocket()
+        try:
+            self.info.disconnect_websocket()
+        except Exception:
+            return
+
+    def reconnect(self) -> None:
+        symbol = self._symbol
+        if symbol is None:
+            raise RuntimeError("cannot reconnect websocket before connect()")
+        self.close()
+        self._reset_state()
+        self.info = Info(base_url=self.base_url, skip_ws=False, timeout=self.timeout_s)
+        self.connect(symbol, user_address=self.user_address)
+
+    def connection_alive(self) -> bool:
+        manager = getattr(self.info, "ws_manager", None)
+        if manager is None:
+            return False
+        ws = getattr(manager, "ws", None)
+        if ws is None or not getattr(ws, "keep_running", False):
+            return False
+        sock = getattr(ws, "sock", None)
+        if sock is None:
+            return False
+        return bool(getattr(sock, "connected", False))
 
     def connect(self, symbol: str, *, user_address: str | None = None) -> None:
         self._symbol = symbol
@@ -264,10 +295,15 @@ class HyperliquidWsStateClient:
         manager = getattr(self.info, "ws_manager", None)
         if manager is None:
             return False
+        if not self.connection_alive():
+            return False
         last_activity = max(self._channel_timestamps.values(), default=datetime.now(tz=UTC))
         if (datetime.now(tz=UTC) - last_activity).total_seconds() < idle_s:
             return False
-        manager.ws.send('{"method":"ping"}')
+        try:
+            manager.ws.send('{"method":"ping"}')
+        except WebSocketConnectionClosedException:
+            return False
         self._last_ping_at = datetime.now(tz=UTC)
         return True
 
@@ -394,6 +430,22 @@ class HyperliquidWsStateClient:
         for item in events:
             self._recent_user_events.append(parse_user_event(item))
         self._recent_user_events = self._recent_user_events[-100:]
+
+    def _reset_state(self) -> None:
+        self._order_book = None
+        self._candles_5m = []
+        self._candles_15m = []
+        self._bbo = None
+        self._active_asset_ctx = None
+        self._clearinghouse_state = None
+        self._open_orders = {}
+        self._recent_fills = []
+        self._recent_user_events = []
+        self._channel_timestamps = {}
+        self._channel_snapshot_flags = {}
+        self._subscription_ids = []
+        self._last_ping_at = None
+        self._last_pong_at = None
 
 
 def parse_bbo_message(payload: object, *, fallback_symbol: str) -> BboSnapshot:

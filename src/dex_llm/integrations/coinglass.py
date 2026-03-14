@@ -65,14 +65,19 @@ class CoinGlassHyperliquidLiqMapClient:
         _ = cache_image
         params = dict(extra_params or {})
         params["symbol"] = symbol.upper()
+        request_headers = self._request_headers()
         response = self._client.get(
             self.liq_map_path,
             params=params,
-            headers=self._request_headers(),
+            headers=request_headers,
         )
         response.raise_for_status()
         payload = response.json()
-        decoded = self._decode_encrypted_response(payload, response.headers)
+        decoded = self._decode_encrypted_response(
+            payload,
+            response.headers,
+            request_headers=request_headers,
+        )
         snapshot = self.parse_liq_map_payload(symbol=symbol.upper(), payload=decoded)
         raw_path = self._write_raw_payload(symbol.upper(), decoded, prefix="coinglass-hl-liqmap")
         return snapshot.model_copy(update={"raw_path": raw_path})
@@ -171,6 +176,8 @@ class CoinGlassHyperliquidLiqMapClient:
         self,
         payload: object,
         headers: Mapping[str, str],
+        *,
+        request_headers: Mapping[str, str] | None = None,
     ) -> dict[str, object]:
         if not isinstance(payload, dict):
             raise ValueError("Unexpected liqMap response envelope")
@@ -178,6 +185,8 @@ class CoinGlassHyperliquidLiqMapClient:
         if not isinstance(encrypted_data, str):
             raise ValueError("liqMap response missing encrypted data")
         time_header = headers.get("time")
+        if not time_header and request_headers is not None:
+            time_header = request_headers.get("cache-ts-v2")
         user_header = headers.get("user")
         if not time_header or not user_header:
             raise ValueError("liqMap response missing decryption headers")

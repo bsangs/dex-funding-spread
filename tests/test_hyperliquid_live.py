@@ -3,6 +3,8 @@ from __future__ import annotations
 import threading
 from datetime import UTC, datetime, timedelta
 
+from websocket import WebSocketConnectionClosedException
+
 from dex_llm.integrations.hyperliquid_live import (
     HyperliquidRestGateway,
     HyperliquidWsStateClient,
@@ -272,3 +274,81 @@ def test_ws_state_client_public_ready_does_not_require_private_snapshot() -> Non
     client.wait_until_public_ready(timeout_s=0.01)
 
     assert client.private_state_ready() is False
+
+
+def test_ws_state_client_heartbeat_returns_false_when_socket_closed() -> None:
+    class ClosedWs:
+        keep_running = True
+        sock = type("Sock", (), {"connected": False})()
+
+        def send(self, _: str) -> None:
+            raise WebSocketConnectionClosedException("closed")
+
+    client = object.__new__(HyperliquidWsStateClient)
+    client.info = type("Info", (), {"ws_manager": type("Mgr", (), {"ws": ClosedWs()})()})()
+    client.base_url = "https://api.hyperliquid.xyz"
+    client.timeout_s = 10.0
+    client.user_address = "0xuser"
+    client._symbol = "BTC"
+    client._lock = threading.Lock()
+    client._order_book = None
+    client._candles_5m = []
+    client._candles_15m = []
+    client._bbo = None
+    client._active_asset_ctx = None
+    client._clearinghouse_state = None
+    client._open_orders = {}
+    client._recent_fills = []
+    client._recent_user_events = []
+    client._channel_timestamps = {"l2Book": datetime.now(tz=UTC) - timedelta(minutes=1)}
+    client._channel_snapshot_flags = {}
+    client._subscription_ids = []
+    client._last_ping_at = None
+    client._last_pong_at = None
+
+    sent = client.send_heartbeat_if_idle(idle_s=5.0)
+
+    assert sent is False
+
+
+def test_ws_state_client_close_ignores_closed_socket_errors() -> None:
+    class StubInfo:
+        def __init__(self) -> None:
+            self.unsubscribed = 0
+            self.disconnected = False
+
+        def unsubscribe(self, subscription: dict[str, object], subscription_id: int) -> None:
+            self.unsubscribed += 1
+            raise WebSocketConnectionClosedException("closed")
+
+        def disconnect_websocket(self) -> None:
+            self.disconnected = True
+            raise WebSocketConnectionClosedException("closed")
+
+    client = object.__new__(HyperliquidWsStateClient)
+    client.info = StubInfo()
+    client.base_url = "https://api.hyperliquid.xyz"
+    client.timeout_s = 10.0
+    client.user_address = "0xuser"
+    client._symbol = "BTC"
+    client._lock = threading.Lock()
+    client._order_book = None
+    client._candles_5m = []
+    client._candles_15m = []
+    client._bbo = None
+    client._active_asset_ctx = None
+    client._clearinghouse_state = None
+    client._open_orders = {}
+    client._recent_fills = []
+    client._recent_user_events = []
+    client._channel_timestamps = {}
+    client._channel_snapshot_flags = {}
+    client._subscription_ids = [({"type": "l2Book", "coin": "BTC"}, 1)]
+    client._last_ping_at = None
+    client._last_pong_at = None
+
+    client.close()
+
+    assert client.info.unsubscribed == 1
+    assert client.info.disconnected is True
+    assert client._subscription_ids == []

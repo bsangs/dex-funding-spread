@@ -126,6 +126,59 @@ def test_bot_runtime_invalidates_single_resting_order() -> None:
     assert "invalidated" in effective.reason
 
 
+def test_bot_runtime_pauses_entry_after_sticky_exchange_rejection() -> None:
+    runtime = object.__new__(BotRuntime)
+    updated_at = datetime.now(tz=UTC)
+    runtime._entry_rejection_block = type(
+        "EntryRejectionBlock",
+        (),
+        {
+            "strategy_updated_at": updated_at,
+            "reason": "Insufficient margin to place order. asset=1",
+        },
+    )()
+    plan = TradePlan(
+        playbook=Playbook.CLUSTER_FADE,
+        side=TradeSide.SHORT,
+        entry_band=(2152.0, 2154.0),
+        invalid_if=2160.0,
+        tp1=2140.0,
+        tp2=2128.0,
+        ttl_min=40,
+        reason="short fade",
+    )
+    state = StrategyState(
+        frame=None,  # type: ignore[arg-type]
+        features=FeatureSnapshot(
+            dominant_cluster_side=None,
+            dominant_ratio=1.0,
+            cluster_balance_ratio=1.0,
+            closest_above_distance=None,
+            closest_below_distance=None,
+            top_above=None,
+            top_below=None,
+            sweep_reclaim_ready=False,
+            double_sweep_ready=False,
+            cluster_fade_ready=True,
+            directional_vacuum=False,
+            notes=[],
+        ),
+        plan=plan,
+        risk=RiskAssessment(allowed=True, reason="ok"),
+        updated_at=updated_at,
+    )
+
+    effective = runtime._effective_plan(
+        strategy_state=state,
+        position=PositionState(),
+        current_price=2100.0,
+        now=datetime.now(tz=UTC),
+    )
+
+    assert effective.playbook == Playbook.NO_TRADE
+    assert "entry paused after exchange rejection" in effective.reason
+
+
 def test_bot_runtime_expires_resting_order_when_touch_window_passes() -> None:
     runtime = object.__new__(BotRuntime)
     plan = TradePlan(
@@ -745,6 +798,7 @@ def _logging_runtime(*, console: Console) -> BotRuntime:
     runtime._last_active_order_signature = None
     runtime._seen_fill_keys = set()
     runtime._seen_user_event_keys = set()
+    runtime._entry_rejection_block = None
     return runtime
 
 

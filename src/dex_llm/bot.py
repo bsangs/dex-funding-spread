@@ -43,6 +43,12 @@ class StrategyState:
     updated_at: datetime
 
 
+@dataclass(slots=True)
+class EntryRejectionBlock:
+    strategy_updated_at: datetime
+    reason: str
+
+
 class BotRuntime:
     def __init__(
         self,
@@ -93,6 +99,7 @@ class BotRuntime:
         self._last_active_order_signature: tuple[tuple[object, ...], ...] | None = None
         self._seen_fill_keys: set[str] = set()
         self._seen_user_event_keys: set[str] = set()
+        self._entry_rejection_block: EntryRejectionBlock | None = None
 
     def run(self, *, max_cycles: int | None = None) -> None:
         cycle = 0
@@ -100,6 +107,9 @@ class BotRuntime:
             self.ws_client.connect(self.symbol, user_address=self.user_address)
             self.ws_client.wait_until_public_ready(timeout_s=self.rest_gateway.timeout_s)
             while max_cycles is None or cycle < max_cycles:
+                if not self.ws_client.connection_alive():
+                    self.ws_client.reconnect()
+                    self.ws_client.wait_until_public_ready(timeout_s=self.rest_gateway.timeout_s)
                 cycle += 1
                 cycle_started = datetime.now(tz=UTC)
                 snapshot, fills, meta = self._capture_snapshot()
@@ -109,6 +119,7 @@ class BotRuntime:
                 position = self._position_state(snapshot, fills)
                 if self._should_refresh_strategy(now=cycle_started):
                     self._strategy_state = self._compute_strategy_state(snapshot, fills, position)
+                    self._entry_rejection_block = None
 
                 if self._strategy_state is None:
                     raise RuntimeError("strategy state was not initialized")
@@ -140,6 +151,11 @@ class BotRuntime:
                     risk=risk,
                 )
                 receipts = pre_strategy_receipts + receipts
+                self._update_entry_rejection_block(
+                    strategy_state=self._strategy_state,
+                    position=position,
+                    receipts=receipts,
+                )
                 if self.live:
                     self.executor.schedule_dead_man_switch(
                         has_resting_entry=bool(effective_plan.resting_orders),
@@ -162,7 +178,14 @@ class BotRuntime:
                     datetime.now(tz=UTC) - cycle_started
                 ).total_seconds()
                 if sleep_for > 0:
-                    self.ws_client.send_heartbeat_if_idle(idle_s=max(5.0, sleep_for / 2))
+                    sent = self.ws_client.send_heartbeat_if_idle(
+                        idle_s=max(5.0, sleep_for / 2)
+                    )
+                    if not sent and not self.ws_client.connection_alive():
+                        self.ws_client.reconnect()
+                        self.ws_client.wait_until_public_ready(
+                            timeout_s=self.rest_gateway.timeout_s
+                        )
                     time.sleep(sleep_for)
         except Exception as exc:
             self._emit_runtime_error(
@@ -304,6 +327,14 @@ class BotRuntime:
             return plan
         if plan.playbook.value == "no_trade":
             return plan
+        entry_rejection_block = getattr(self, "_entry_rejection_block", None)
+        if (
+            entry_rejection_block is not None
+            and entry_rejection_block.strategy_updated_at == strategy_state.updated_at
+        ):
+            return self._flat_plan(
+                f"entry paused after exchange rejection: {entry_rejection_block.reason}"
+            )
         if self._has_recent_fill_since(strategy_state.updated_at, fills):
             return self._flat_plan("recent fill detected; wait for next 5m strategy review")
         if plan.resting_orders:
@@ -511,6 +542,53 @@ class BotRuntime:
             return False
         fill_time = getattr(fills[-1], "time", None)
         return isinstance(fill_time, datetime) and fill_time > updated_at
+
+    def _update_entry_rejection_block(
+        self,
+        *,
+        strategy_state: StrategyState,
+        position: PositionState,
+        receipts: list[dict[str, object]],
+    ) -> None:
+        if position.side != TradeSide.FLAT:
+            self._entry_rejection_block = None
+            return
+        for receipt in receipts:
+            reason = self._sticky_entry_rejection_reason(receipt)
+            if reason is None:
+                continue
+            self._entry_rejection_block = EntryRejectionBlock(
+                strategy_updated_at=strategy_state.updated_at,
+                reason=reason,
+            )
+            return
+
+    @staticmethod
+    def _sticky_entry_rejection_reason(receipt: dict[str, object]) -> str | None:
+        action = str(receipt.get("action", ""))
+        message = str(receipt.get("message", "")).strip()
+        if not message:
+            return None
+        if action == "leverage_preflight":
+            return message
+        if not BotRuntime._receipt_is_error(receipt):
+            return None
+        cloid = receipt.get("cloid")
+        role = extract_role_from_cloid(cloid if isinstance(cloid, str) else None)
+        if role not in {OrderRole.ENTRY, OrderRole.UNKNOWN}:
+            return None
+        sticky_markers = (
+            "Insufficient margin",
+            "insufficient isolated margin",
+            "target leverage exceeds venue max",
+            "target leverage outside",
+            "minimum order notional not met",
+            "size rounds to zero",
+            "price and size must be positive",
+        )
+        if any(marker in message for marker in sticky_markers):
+            return message
+        return None
 
     def _position_state(
         self,
