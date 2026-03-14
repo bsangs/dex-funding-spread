@@ -14,7 +14,7 @@ heatmap_cache_dir = "data/heatmaps"
 coinglass_scrape_timeout_s = 20.0
 bot_strategy_interval_s = 900
 bot_sync_interval_s = 120
-long_notional_fraction = 1.0
+long_notional_fraction = 0.9
 short_notional_fraction = 0.4
 # false로 두면 stop loss child 주문을 만들지 않음
 enable_stop_loss = false

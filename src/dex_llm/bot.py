@@ -464,6 +464,12 @@ class BotRuntime:
             return [receipt.model_dump(mode="json") for receipt in receipts], None
 
         if plan.playbook == Playbook.NO_TRADE:
+            has_active_entry_workflow = any(
+                order.coin == self.symbol and not order.reduce_only
+                for order in position.active_orders
+            )
+            if position.side == TradeSide.FLAT and has_active_entry_workflow:
+                return [], None
             signed_position_size = self.executor._signed_position_size(position)
             receipts = self.executor.reconcile_orders(
                 symbol=self.symbol,
@@ -483,6 +489,13 @@ class BotRuntime:
                     )
                 )
             return [receipt.model_dump(mode="json") for receipt in receipts], None
+
+        if (
+            position.side == TradeSide.FLAT
+            and not risk.allowed
+            and any(order.coin == self.symbol and not order.reduce_only for order in position.active_orders)
+        ):
+            return [], None
 
         desired_orders = self.executor.build_orders_from_plan(
             symbol=self.symbol,

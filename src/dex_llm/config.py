@@ -45,7 +45,7 @@ class AppSettings(BaseSettings):
     bot_sync_interval_s: int = 120
     kill_switch_max_info_latency_ms: float = 1_500.0
     kill_switch_max_private_latency_ms: float = 1_500.0
-    long_notional_fraction: float = 1.0
+    long_notional_fraction: float = 0.9
     short_notional_fraction: float = 0.4
     enable_stop_loss: bool = False
     execution_mode: ExecutionMode = ExecutionMode.PAPER
@@ -54,7 +54,6 @@ class AppSettings(BaseSettings):
     short_target_leverage: int = 15
     base_leverage: float = 6.0
     max_leverage: float = 20.0
-    max_price_deviation_bps: float = 500.0
     openai_image_detail: str = "auto"
     clock_drift_limit_ms: float = 500.0
 

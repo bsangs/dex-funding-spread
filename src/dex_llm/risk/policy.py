@@ -15,7 +15,7 @@ from dex_llm.models import (
 class RiskPolicy:
     def __init__(
         self,
-        long_notional_fraction: float = 1.0,
+        long_notional_fraction: float = 0.9,
         short_notional_fraction: float = 0.4,
         long_target_leverage: int = 20,
         short_target_leverage: int = 15,

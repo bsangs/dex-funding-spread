@@ -264,7 +264,6 @@ def test_nonce_manager_seeds_and_increments(tmp_path: Path) -> None:
 def test_pre_submit_validator_quantizes_and_blocks_bad_reduce_only() -> None:
     validator = PreSubmitValidator(
         {"BTC": AssetMetadata(symbol="BTC", asset_index=0, size_decimals=3, max_leverage=20.0)},
-        max_price_deviation_bps=500.0,
     )
 
     result = validator.validate_order(
@@ -1111,6 +1110,85 @@ def test_execute_plan_uses_live_position_size_for_exit_updates() -> None:
     assert len(receipts) == 1
     assert receipts[0].action == "keep"
     assert receipts[0].decision == ReconciliationDecision.KEEP
+
+
+def test_execute_plan_keeps_matching_active_entry_workflow_without_canceling_child_orders() -> None:
+    exchange = FakeExchange()
+    validator = PreSubmitValidator(
+        {"BTC": AssetMetadata(symbol="BTC", asset_index=0, size_decimals=3, max_leverage=20.0)}
+    )
+    executor = HyperliquidExchangeExecutor(
+        base_url="https://api.hyperliquid.xyz",
+        signer_private_key="0x59c6995e998f97a5a0044966f094538b2924c92f6e7e0c0c7f3d4e3cbb0dbe4a",
+        signer_agent_address="0x0000000000000000000000000000000000000000",
+        trading_user_address="0x1111111111111111111111111111111111111111",
+        validator=validator,
+        nonce_manager=NonceManager("0xsigner", now_ms=lambda: 1_000),
+        exchange_client=exchange,
+        enable_stop_loss=False,
+    )
+    plan = TradePlan(
+        playbook=Playbook.MAGNET_FOLLOW,
+        side=TradeSide.LONG,
+        entry_band=(70000.0, 70010.0),
+        invalid_if=69900.0,
+        tp1=70100.0,
+        tp2=70200.0,
+        ttl_min=12,
+        reason="preserve grouped entry",
+    )
+
+    receipts = executor.execute_plan(
+        plan=plan,
+        risk=RiskAssessment(
+            allowed=True,
+            reason="risk checks passed",
+            recommended_quantity=0.12,
+            recommended_notional=840.0,
+            risk_budget=840.0,
+        ),
+        symbol="BTC",
+        frame_timestamp=datetime(2026, 3, 13, 0, 0, tzinfo=UTC),
+        position=PositionState(
+            active_orders=[
+                LiveOrderState(
+                    coin="BTC",
+                    side="B",
+                    limit_price=70005.0,
+                    size=0.12,
+                    reduce_only=False,
+                    is_trigger=False,
+                    order_type="limit",
+                    oid=1,
+                    cloid="0x1100feedfeedfeedfeedfeedfeedfeed",
+                    status=OrderState.OPEN,
+                    role=OrderRole.ENTRY,
+                ),
+                LiveOrderState(
+                    coin="BTC",
+                    side="A",
+                    limit_price=70200.0,
+                    size=0.12,
+                    reduce_only=True,
+                    is_trigger=True,
+                    order_type="trigger",
+                    oid=2,
+                    cloid="0x2200feedfeedfeedfeedfeedfeedfeed",
+                    status=OrderState.OPEN,
+                    role=OrderRole.TAKE_PROFIT_2,
+                    trigger_price=70200.0,
+                ),
+            ]
+        ),
+        best_bid=70000.0,
+        best_ask=70010.0,
+        oracle_price=70005.0,
+    )
+
+    assert len(receipts) == 1
+    assert receipts[0].decision == ReconciliationDecision.KEEP
+    assert not exchange.canceled
+    assert not exchange.ordered
 
 
 def test_cancel_receipt_marks_missing_order_as_canceled() -> None:

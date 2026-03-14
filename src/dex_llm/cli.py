@@ -317,7 +317,6 @@ def _build_executor(
     asset_meta = rest_gateway.fetch_asset_meta(symbol)
     validator = PreSubmitValidator(
         {symbol: asset_meta},
-        max_price_deviation_bps=settings.max_price_deviation_bps,
     )
     budgeter = RateLimitBudgeter()
     rate_limit_payload = rest_gateway.user_rate_limit(user_address)

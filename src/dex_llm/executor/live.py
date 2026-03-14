@@ -656,19 +656,10 @@ class HyperliquidExchangeExecutor:
             for order in current_orders
             if order.coin == symbol and not order.reduce_only
         ]
-        receipts = [
-            self.cancel_order(symbol, order)
-            for order in current_orders
-            if order.coin == symbol and order.reduce_only
-        ]
-
         if len(current_entry_orders) == 1:
             current_entry = current_entry_orders[0]
-            if (
-                current_entry.cloid in self._grouped_entry_cloids
-                and self._can_keep(current_entry, parent_order)
-            ):
-                receipts.append(
+            if self._can_keep(current_entry, parent_order):
+                return [
                     self._receipt(
                         symbol=symbol,
                         cloid=current_entry.cloid or parent_order.cloid,
@@ -678,8 +669,13 @@ class HyperliquidExchangeExecutor:
                         status=current_entry.status,
                         message="existing grouped entry already matches desired state",
                     )
-                )
-                return receipts
+                ]
+
+        receipts = [
+            self.cancel_order(symbol, order)
+            for order in current_orders
+            if order.coin == symbol and order.reduce_only
+        ]
 
         for current_entry in current_entry_orders:
             receipts.append(self.cancel_order(symbol, current_entry))

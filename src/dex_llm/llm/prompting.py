@@ -25,6 +25,7 @@ def build_router_payload(
     return {
         "exchange": frame.exchange,
         "symbol": frame.symbol,
+        "current_price": frame.current_price,
         "atr": frame.atr,
         "map_quality": frame.map_quality.value,
         "heatmap_path": frame.heatmap_path,
@@ -233,7 +234,8 @@ def build_router_input(
                 "TradePlan 하나만 반환하세요. 신규 진입은 시장가가 아니라 지정가만 사용하세요. "
                 "현재가에 바로 체결되는지보다 다음 10분~6시간 가격 경로를 먼저 가정하고, 그 경로 안에서 "
                 "도달 가능성이 높은 지정가 구간을 고르세요. 현재가 주변에 즉시 체결될 자리가 없다는 "
-                "이유만으로 no_trade를 반환하지 마세요."
+                "이유만으로 no_trade를 반환하지 마세요. 다만 현재가에서 지나치게 먼 가격은 특별히 강한 "
+                "구조적 경로를 설명할 수 있을 때만 제시하고, 그렇지 않으면 no_trade를 반환하세요."
             ),
         }
     ]

@@ -12,9 +12,11 @@ from dex_llm.models import (
     AccountState,
     Candle,
     FeatureSnapshot,
+    LiveOrderState,
     KillSwitchStatus,
     LiveStateSnapshot,
     OrderBookSnapshot,
+    OrderState,
     PriceLevel,
     HyperliquidUserFill,
     MarketFrame,
@@ -311,6 +313,217 @@ def test_bot_runtime_returns_receipt_when_live_leverage_preflight_is_invalid() -
     assert len(receipts) == 1
     assert receipts[0]["action"] == "leverage_preflight"
     assert receipts[0]["status"] == "rejected"
+
+
+def test_bot_runtime_keeps_active_entry_workflow_on_soft_no_trade() -> None:
+    runtime = object.__new__(BotRuntime)
+    runtime.live = True
+    runtime.symbol = "ETH"
+
+    class StubExecutor:
+        def _signed_position_size(self, position: PositionState) -> float:
+            raise AssertionError("existing entry workflow should be preserved, not reconciled")
+
+    runtime.executor = StubExecutor()
+
+    receipts, leverage_preflight = runtime._sync_orders(
+        snapshot=type(
+            "Snapshot",
+            (),
+            {
+                "order_book": type(
+                    "Book",
+                    (),
+                    {
+                        "best_bid": 2100.0,
+                        "best_ask": 2101.0,
+                    },
+                )(),
+                "active_asset_ctx": type("Ctx", (), {"oracle_price": 2100.5})(),
+                "captured_at": datetime.now(tz=UTC),
+            },
+        )(),
+        position=PositionState(
+            side=TradeSide.FLAT,
+            active_orders=[
+                LiveOrderState(
+                    coin="ETH",
+                    side="B",
+                    limit_price=2039.0,
+                    size=0.1,
+                    reduce_only=False,
+                    is_trigger=False,
+                    order_type="limit",
+                    oid=1,
+                    status=OrderState.OPEN,
+                ),
+                LiveOrderState(
+                    coin="ETH",
+                    side="A",
+                    limit_price=2092.0,
+                    size=0.1,
+                    reduce_only=True,
+                    is_trigger=True,
+                    order_type="trigger",
+                    oid=2,
+                    status=OrderState.OPEN,
+                ),
+            ],
+        ),
+        account=AccountState(equity=200.0, available_margin=200.0, max_leverage=10.0),
+        plan=TradePlan(
+            playbook=Playbook.NO_TRADE,
+            side=TradeSide.FLAT,
+            entry_band=(0.0, 0.0),
+            invalid_if=0.0,
+            tp1=0.0,
+            tp2=0.0,
+            ttl_min=0,
+            reason="existing entry workflow detected; reconcile open orders first",
+        ),
+        risk=RiskAssessment(allowed=False, reason="plan requests hold/close only"),
+    )
+
+    assert receipts == []
+    assert leverage_preflight is None
+
+
+def test_bot_runtime_keeps_active_entry_workflow_even_on_hard_no_trade_reason() -> None:
+    runtime = object.__new__(BotRuntime)
+    runtime.live = True
+    runtime.symbol = "ETH"
+
+    class StubExecutor:
+        def _signed_position_size(self, position: PositionState) -> float:
+            raise AssertionError("flat active entry workflow should never cancel-only")
+
+    runtime.executor = StubExecutor()
+
+    receipts, leverage_preflight = runtime._sync_orders(
+        snapshot=type(
+            "Snapshot",
+            (),
+            {
+                "order_book": type(
+                    "Book",
+                    (),
+                    {
+                        "best_bid": 2100.0,
+                        "best_ask": 2101.0,
+                    },
+                )(),
+                "active_asset_ctx": type("Ctx", (), {"oracle_price": 2100.5})(),
+                "captured_at": datetime.now(tz=UTC),
+            },
+        )(),
+        position=PositionState(
+            side=TradeSide.FLAT,
+            active_orders=[
+                LiveOrderState(
+                    coin="ETH",
+                    side="B",
+                    limit_price=2039.0,
+                    size=0.1,
+                    reduce_only=False,
+                    is_trigger=False,
+                    order_type="limit",
+                    oid=1,
+                    status=OrderState.OPEN,
+                ),
+            ],
+        ),
+        account=AccountState(equity=200.0, available_margin=200.0, max_leverage=10.0),
+        plan=TradePlan(
+            playbook=Playbook.NO_TRADE,
+            side=TradeSide.FLAT,
+            entry_band=(0.0, 0.0),
+            invalid_if=0.0,
+            tp1=0.0,
+            tp2=0.0,
+            ttl_min=0,
+            reason="directional entry invalidated before fill",
+        ),
+        risk=RiskAssessment(allowed=False, reason="plan requests hold/close only"),
+    )
+
+    assert receipts == []
+    assert leverage_preflight is None
+
+
+def test_bot_runtime_keeps_active_entry_workflow_when_risk_blocks_new_entry() -> None:
+    runtime = object.__new__(BotRuntime)
+    runtime.live = True
+    runtime.symbol = "ETH"
+
+    class StubExecutor:
+        def build_orders_from_plan(self, **kwargs: object):
+            raise AssertionError("blocked active entry workflow should not rebuild desired orders")
+
+    runtime.executor = StubExecutor()
+
+    receipts, leverage_preflight = runtime._sync_orders(
+        snapshot=type(
+            "Snapshot",
+            (),
+            {
+                "order_book": type(
+                    "Book",
+                    (),
+                    {
+                        "best_bid": 2100.0,
+                        "best_ask": 2101.0,
+                    },
+                )(),
+                "active_asset_ctx": type("Ctx", (), {"oracle_price": 2100.5})(),
+                "captured_at": datetime.now(tz=UTC),
+            },
+        )(),
+        position=PositionState(
+            side=TradeSide.FLAT,
+            active_orders=[
+                LiveOrderState(
+                    coin="ETH",
+                    side="B",
+                    limit_price=2039.0,
+                    size=0.1,
+                    reduce_only=False,
+                    is_trigger=False,
+                    order_type="limit",
+                    oid=1,
+                    status=OrderState.OPEN,
+                ),
+                LiveOrderState(
+                    coin="ETH",
+                    side="A",
+                    limit_price=2092.0,
+                    size=0.1,
+                    reduce_only=True,
+                    is_trigger=True,
+                    order_type="trigger",
+                    oid=2,
+                    status=OrderState.OPEN,
+                ),
+            ],
+        ),
+        account=AccountState(equity=200.0, available_margin=200.0, max_leverage=10.0),
+        plan=TradePlan(
+            playbook=Playbook.CLUSTER_FADE,
+            side=TradeSide.LONG,
+            entry_band=(2038.0, 2040.0),
+            invalid_if=2017.0,
+            tp1=2077.0,
+            tp2=2092.0,
+            ttl_min=300,
+            reason="preserve existing active entry workflow",
+        ),
+        risk=RiskAssessment(
+            allowed=False,
+            reason="entry workflow already exists; reconcile live orders first",
+        ),
+    )
+
+    assert receipts == []
+    assert leverage_preflight is None
 
 
 def test_bot_runtime_clamps_target_leverage_to_account_max() -> None:

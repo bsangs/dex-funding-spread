@@ -202,12 +202,10 @@ class PreSubmitValidator:
         self,
         asset_metadata: Mapping[str, AssetMetadata] | None = None,
         *,
-        max_price_deviation_bps: float = 500.0,
         min_notional: float = 10.0,
         leverage_buffer_fraction: float = 0.0,
     ) -> None:
         self.asset_metadata = asset_metadata or {}
-        self.max_price_deviation_bps = max_price_deviation_bps
         self.min_notional = min_notional
         self.leverage_buffer_fraction = leverage_buffer_fraction
 
@@ -303,15 +301,6 @@ class PreSubmitValidator:
                 return ValidationResult(valid=False, reason="reduce-only long position must sell")
             if current_position_size < 0 and side != TradeSide.LONG:
                 return ValidationResult(valid=False, reason="reduce-only short position must buy")
-
-        reference_price = oracle_price or self._mid(best_bid, best_ask)
-        if reference_price is not None:
-            deviation_bps = abs((quantized_price - reference_price) / reference_price) * 10_000
-            if deviation_bps > self.max_price_deviation_bps:
-                return ValidationResult(
-                    valid=False,
-                    reason=f"price deviates {deviation_bps:.0f} bps from oracle/mid",
-                )
 
         return ValidationResult(
             valid=True,

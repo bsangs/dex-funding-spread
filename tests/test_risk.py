@@ -85,6 +85,6 @@ def test_risk_policy_allocates_more_notional_to_longs_than_shorts() -> None:
 
     assert long_assessment.allowed is True
     assert short_assessment.allowed is True
-    assert long_assessment.recommended_notional == 100_000.0
+    assert long_assessment.recommended_notional == 90_000.0
     assert short_assessment.recommended_notional == 40_000.0
     assert long_assessment.recommended_quantity > short_assessment.recommended_quantity
