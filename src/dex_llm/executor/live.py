@@ -405,15 +405,19 @@ class HyperliquidExchangeExecutor:
         frame_timestamp: datetime,
         revision: int,
         strategy_id: str = "dex-llm",
+        quantity_override: float | None = None,
     ) -> list[DesiredOrder]:
         target_order: RestingOrderPlan | TradePlan
         quantity: float
         if plan.resting_orders:
             target_order = plan.resting_orders[0]
-            quantity = self._resting_quantities(resting_orders=plan.resting_orders, risk=risk)[0]
+            if quantity_override is not None:
+                quantity = quantity_override
+            else:
+                quantity = self._resting_quantities(resting_orders=plan.resting_orders, risk=risk)[0]
         else:
             target_order = plan
-            quantity = self._entry_quantity(risk)
+            quantity = self._entry_quantity(risk, quantity_override=quantity_override)
         if quantity <= 0:
             return []
         entry_price = sum(target_order.entry_band) / 2
@@ -632,12 +636,22 @@ class HyperliquidExchangeExecutor:
         best_ask: float,
         oracle_price: float | None,
     ) -> list[ExecutionReceipt]:
+        current_entry_orders = [
+            order
+            for order in current_orders
+            if order.coin == symbol and not order.reduce_only
+        ]
+        quantity_override = None
+        if len(current_entry_orders) == 1 and current_entry_orders[0].size > 0:
+            quantity_override = current_entry_orders[0].size
+
         desired_orders = self.build_grouped_entry_orders(
             symbol=symbol,
             plan=plan,
             risk=risk,
             frame_timestamp=frame_timestamp,
             revision=revision,
+            quantity_override=quantity_override,
         )
         if not desired_orders:
             return self.reconcile_orders(
@@ -651,11 +665,6 @@ class HyperliquidExchangeExecutor:
             )
 
         parent_order = desired_orders[0]
-        current_entry_orders = [
-            order
-            for order in current_orders
-            if order.coin == symbol and not order.reduce_only
-        ]
         if len(current_entry_orders) == 1:
             current_entry = current_entry_orders[0]
             if self._can_keep(current_entry, parent_order):

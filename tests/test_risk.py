@@ -7,9 +7,11 @@ from dex_llm.features.extractor import FeatureExtractor
 from dex_llm.llm.router import HeuristicPlaybookRouter
 from dex_llm.models import (
     AccountState,
+    LiveOrderState,
     MarketFrame,
     Playbook,
     PositionState,
+    OrderState,
     TradePlan,
     TradeSide,
 )
@@ -88,3 +90,37 @@ def test_risk_policy_allocates_more_notional_to_longs_than_shorts() -> None:
     assert long_assessment.recommended_notional == 90_000.0
     assert short_assessment.recommended_notional == 40_000.0
     assert long_assessment.recommended_quantity > short_assessment.recommended_quantity
+
+
+def test_risk_policy_allows_replace_evaluation_with_active_entry_workflow() -> None:
+    account = AccountState(equity=10_000.0, available_margin=10_000.0, max_leverage=10.0)
+    plan = TradePlan(
+        playbook=Playbook.CLUSTER_FADE,
+        side=TradeSide.LONG,
+        entry_band=(3998.0, 4002.0),
+        invalid_if=3970.0,
+        tp1=4025.0,
+        tp2=4040.0,
+        ttl_min=30,
+        reason="long entry",
+    )
+    position = PositionState(
+        active_orders=[
+            LiveOrderState(
+                coin="BTC",
+                side="B",
+                limit_price=4000.0,
+                size=0.1,
+                reduce_only=False,
+                is_trigger=False,
+                order_type="limit",
+                oid=1,
+                status=OrderState.OPEN,
+            )
+        ]
+    )
+
+    assessment = RiskPolicy().assess(plan, account, position, None)
+
+    assert assessment.allowed is True
+    assert assessment.recommended_quantity > 0

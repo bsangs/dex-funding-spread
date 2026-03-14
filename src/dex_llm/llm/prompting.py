@@ -26,6 +26,8 @@ def build_router_payload(
         "exchange": frame.exchange,
         "symbol": frame.symbol,
         "current_price": frame.current_price,
+        "position_side": frame.position.side.value,
+        "open_orders": frame.position.open_orders,
         "atr": frame.atr,
         "map_quality": frame.map_quality.value,
         "heatmap_path": frame.heatmap_path,
@@ -64,6 +66,15 @@ def build_router_payload(
             atr=frame.atr,
         ),
         "higher_timeframe_levels": frame.metadata.get("higher_timeframe_levels"),
+        "active_orders": [
+            _active_order_payload(order, current_price=frame.current_price)
+            for order in frame.position.active_orders
+            if order.coin == frame.symbol
+        ],
+        "has_active_entry_workflow": any(
+            order.coin == frame.symbol and not order.reduce_only
+            for order in frame.position.active_orders
+        ),
         "entry_candidates": [
             candidate.model_dump(mode="json") for candidate in features.entry_candidates
         ],
@@ -212,6 +223,24 @@ def _as_float(value: object) -> float | None:
     return None
 
 
+def _active_order_payload(order, *, current_price: float) -> dict[str, object]:
+    reference_price = order.trigger_price or order.limit_price
+    distance_bps = None
+    if reference_price and current_price > 0:
+        distance_bps = abs(reference_price - current_price) / current_price * 10_000
+    return {
+        "role": order.role.value,
+        "side": order.side,
+        "limit_price": order.limit_price,
+        "trigger_price": order.trigger_price,
+        "size": order.size,
+        "reduce_only": order.reduce_only,
+        "status": order.status.value,
+        "timestamp": order.timestamp.isoformat() if order.timestamp is not None else None,
+        "distance_bps_from_current": round(distance_bps, 1) if distance_bps is not None else None,
+    }
+
+
 def build_router_input(
     frame: MarketFrame,
     features: FeatureSnapshot,
@@ -235,7 +264,9 @@ def build_router_input(
                 "현재가에 바로 체결되는지보다 다음 10분~6시간 가격 경로를 먼저 가정하고, 그 경로 안에서 "
                 "도달 가능성이 높은 지정가 구간을 고르세요. 현재가 주변에 즉시 체결될 자리가 없다는 "
                 "이유만으로 no_trade를 반환하지 마세요. 다만 현재가에서 지나치게 먼 가격은 특별히 강한 "
-                "구조적 경로를 설명할 수 있을 때만 제시하고, 그렇지 않으면 no_trade를 반환하세요."
+                "구조적 경로를 설명할 수 있을 때만 제시하고, 그렇지 않으면 no_trade를 반환하세요. "
+                "현재 미체결 주문이 있으면 그 주문을 먼저 인식하고 keep 할지 replace 할지 매우 보수적으로 판단하세요. "
+                "분명한 구조 개선이나 무효화 근거가 없으면 기존 미체결 주문을 유지하세요. cancel-only 의도는 만들지 마세요."
             ),
         }
     ]

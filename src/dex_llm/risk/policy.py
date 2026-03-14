@@ -51,11 +51,10 @@ class RiskPolicy:
         if plan.playbook == Playbook.NO_TRADE or plan.side == TradeSide.FLAT:
             return RiskAssessment(allowed=False, reason="plan requests hold/close only")
 
-        has_pending_entry = any(not order.reduce_only for order in position.active_orders)
-        if position.entries_blocked_reduce_only or has_pending_entry:
+        if position.entries_blocked_reduce_only:
             return RiskAssessment(
                 allowed=False,
-                reason="entry workflow already exists; reconcile live orders first",
+                reason="ambiguous live entry state requires reduce-only mode",
             )
 
         if position.side != TradeSide.FLAT or position.quantity > 0:

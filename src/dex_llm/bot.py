@@ -116,7 +116,8 @@ class BotRuntime:
                 if not self.live:
                     pre_strategy_receipts = self._paper_mark_market(snapshot, cycle_started)
                 position = self._position_state(snapshot, fills)
-                if self._should_refresh_strategy(now=cycle_started):
+                strategy_refreshed = self._should_refresh_strategy(now=cycle_started)
+                if strategy_refreshed:
                     self._strategy_state = self._compute_strategy_state(snapshot, fills, position)
                     self._entry_rejection_block = None
 
@@ -168,6 +169,7 @@ class BotRuntime:
                     plan=effective_plan,
                     risk=risk,
                     kill_switch=kill_switch,
+                    strategy_refreshed=strategy_refreshed,
                     receipts=receipts,
                     meta=meta,
                 )
@@ -722,6 +724,7 @@ class BotRuntime:
         plan: TradePlan,
         risk: RiskAssessment,
         kill_switch: KillSwitchStatus,
+        strategy_refreshed: bool,
         receipts: list[dict[str, object]],
         meta: dict[str, object],
     ) -> None:
@@ -742,6 +745,10 @@ class BotRuntime:
                 )
             )
             self._seed_seen_events(snapshot)
+
+        if strategy_refreshed:
+            refresh_scope = "entry_review" if position.side == TradeSide.FLAT else "position_review"
+            lines.append(self._event_line("REFRESH", f"{refresh_scope} completed"))
 
         lines.extend(self._render_plan_events(plan=plan, first_cycle=first_cycle))
         lines.extend(

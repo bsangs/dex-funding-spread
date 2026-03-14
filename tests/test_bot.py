@@ -851,6 +851,7 @@ def test_bot_runtime_emit_cycle_suppresses_idle_cycles_after_boot() -> None:
         plan=plan,
         risk=RiskAssessment(allowed=False, reason="plan requests hold/close only"),
         kill_switch=KillSwitchStatus(),
+        strategy_refreshed=True,
         receipts=[],
         meta=_meta(),
     )
@@ -868,6 +869,7 @@ def test_bot_runtime_emit_cycle_suppresses_idle_cycles_after_boot() -> None:
         plan=plan,
         risk=RiskAssessment(allowed=False, reason="plan requests hold/close only"),
         kill_switch=KillSwitchStatus(),
+        strategy_refreshed=False,
         receipts=[],
         meta=_meta(),
     )
@@ -897,6 +899,7 @@ def test_bot_runtime_emit_cycle_groups_eventful_cycle_into_review_block() -> Non
         plan=plan,
         risk=RiskAssessment(allowed=True, reason="side-based sizing checks passed"),
         kill_switch=KillSwitchStatus(),
+        strategy_refreshed=True,
         receipts=[
             {
                 "action": "place",
@@ -941,6 +944,7 @@ def test_bot_runtime_treats_grouped_submit_as_order_not_error() -> None:
         plan=plan,
         risk=RiskAssessment(allowed=True, reason="ok"),
         kill_switch=KillSwitchStatus(),
+        strategy_refreshed=True,
         receipts=[
             {
                 "action": "place",
@@ -958,6 +962,38 @@ def test_bot_runtime_treats_grouped_submit_as_order_not_error() -> None:
     output = buffer.getvalue()
     assert "ORDER" in output
     assert "grouped order submitted" not in output or "ERROR" not in output
+
+
+def test_bot_runtime_emits_refresh_line_even_when_plan_is_unchanged() -> None:
+    buffer = io.StringIO()
+    runtime = _logging_runtime(console=Console(file=buffer, force_terminal=False, width=120))
+    now = datetime.now(tz=UTC)
+    plan = TradePlan(
+        playbook=Playbook.NO_TRADE,
+        side=TradeSide.FLAT,
+        entry_band=(0.0, 0.0),
+        invalid_if=0.0,
+        tp1=0.0,
+        tp2=0.0,
+        ttl_min=0,
+        reason="idle",
+    )
+
+    runtime._emit_cycle(
+        cycle=1,
+        snapshot=_snapshot(now=now),
+        position=PositionState(),
+        plan=plan,
+        risk=RiskAssessment(allowed=False, reason="plan requests hold/close only"),
+        kill_switch=KillSwitchStatus(),
+        strategy_refreshed=True,
+        receipts=[],
+        meta=_meta(),
+    )
+    output = buffer.getvalue()
+
+    assert "REFRESH" in output
+    assert "entry_review completed" in output
 
 
 def test_bot_runtime_emit_cycle_keeps_printing_errors_when_error_persists() -> None:
@@ -987,6 +1023,7 @@ def test_bot_runtime_emit_cycle_keeps_printing_errors_when_error_persists() -> N
         plan=plan,
         risk=RiskAssessment(allowed=False, reason="private account state unavailable"),
         kill_switch=kill_switch,
+        strategy_refreshed=True,
         receipts=[],
         meta=_meta(),
     )
@@ -1001,6 +1038,7 @@ def test_bot_runtime_emit_cycle_keeps_printing_errors_when_error_persists() -> N
         plan=plan,
         risk=RiskAssessment(allowed=False, reason="private account state unavailable"),
         kill_switch=kill_switch,
+        strategy_refreshed=False,
         receipts=[],
         meta=_meta(),
     )
@@ -1017,6 +1055,7 @@ def test_bot_runtime_emit_cycle_keeps_printing_errors_when_error_persists() -> N
         plan=plan,
         risk=RiskAssessment(allowed=False, reason="private account state unavailable"),
         kill_switch=kill_switch,
+        strategy_refreshed=False,
         receipts=[],
         meta=_meta(),
     )
