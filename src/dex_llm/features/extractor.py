@@ -315,4 +315,4 @@ class FeatureExtractor:
         persistence_score: float,
     ) -> int:
         estimate = int(25 + distance_atr * 18 + (1 - persistence_score) * 25)
-        return max(20, min(120, estimate))
+        return max(20, min(360, estimate))
