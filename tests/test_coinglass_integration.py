@@ -260,6 +260,60 @@ def test_hyperliquid_liqmap_client_decodes_with_cache_ts_when_time_header_missin
     client.close()
 
 
+def test_hyperliquid_liqmap_client_decodes_v1_with_request_path_seed(
+    tmp_path: Path,
+) -> None:
+    decoded_payload = {
+        "price": 2075.3,
+        "list": [
+            {
+                "liquidationPrice": 1572.4736,
+                "positionUsd": 145_258_396.3348,
+                "updateTime": 1_773_421_324_000,
+            }
+        ],
+    }
+    request_path = "/api/hyperliquid/topPosition/liqMap"
+    seed_key = base64.b64encode(request_path.encode("utf-8")).decode("ascii")[:16]
+    data_key = "751d501a4a014860"
+    user_header = _encrypt_and_b64(gzip.compress(data_key.encode("utf-8")), seed_key)
+    data_body = _encrypt_and_b64(
+        gzip.compress(json.dumps(decoded_payload, separators=(",", ":")).encode("utf-8")),
+        data_key,
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == request_path
+        return httpx.Response(
+            200,
+            json={
+                "code": "0",
+                "msg": "success",
+                "data": data_body,
+                "success": True,
+            },
+            headers={
+                "user": user_header,
+                "encryption": "true",
+                "v": "1",
+            },
+            request=request,
+        )
+
+    client = CoinGlassHyperliquidLiqMapClient(
+        cache_dir=tmp_path,
+        transport=httpx.MockTransport(handler),
+    )
+
+    snapshot = client.fetch_heatmap("ETH")
+
+    assert snapshot.provider == "coinglass-hyperliquid-liqmap"
+    assert snapshot.metadata["price"] == 2075.3
+    assert len(snapshot.metadata["positions"]) == 1
+    assert snapshot.clusters_below[0].price == 1572.4736
+    client.close()
+
+
 def _encrypt_and_b64(payload: bytes, key: str) -> str:
     cipher = AES.new(key.encode("utf-8"), AES.MODE_ECB)
     return base64.b64encode(cipher.encrypt(pad(payload, AES.block_size))).decode("ascii")

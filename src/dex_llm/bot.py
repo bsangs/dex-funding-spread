@@ -107,9 +107,8 @@ class BotRuntime:
             self.ws_client.connect(self.symbol, user_address=self.user_address)
             self.ws_client.wait_until_public_ready(timeout_s=self.rest_gateway.timeout_s)
             while max_cycles is None or cycle < max_cycles:
-                if not self.ws_client.connection_alive():
-                    self.ws_client.reconnect()
-                    self.ws_client.wait_until_public_ready(timeout_s=self.rest_gateway.timeout_s)
+                if not self._ensure_ws_connection(timeout_s=self.rest_gateway.timeout_s):
+                    continue
                 cycle += 1
                 cycle_started = datetime.now(tz=UTC)
                 snapshot, fills, meta = self._capture_snapshot()
@@ -182,10 +181,11 @@ class BotRuntime:
                         idle_s=max(5.0, sleep_for / 2)
                     )
                     if not sent and not self.ws_client.connection_alive():
-                        self.ws_client.reconnect()
-                        self.ws_client.wait_until_public_ready(
-                            timeout_s=self.rest_gateway.timeout_s
-                        )
+                        if not self._ensure_ws_connection(
+                            timeout_s=self.rest_gateway.timeout_s,
+                            cycle=cycle,
+                        ):
+                            continue
                     time.sleep(sleep_for)
         except Exception as exc:
             self._emit_runtime_error(
@@ -202,6 +202,23 @@ class BotRuntime:
                 and hasattr(self.builder.heatmap_client, "close")
             ):
                 self.builder.heatmap_client.close()
+
+    def _ensure_ws_connection(
+        self,
+        *,
+        timeout_s: float,
+        cycle: int | None = None,
+    ) -> bool:
+        if self.ws_client.connection_alive():
+            return True
+        try:
+            self.ws_client.reconnect()
+            self.ws_client.wait_until_public_ready(timeout_s=timeout_s)
+            return True
+        except Exception as exc:
+            self._emit_runtime_error(phase="reconnect", cycle=cycle, exc=exc)
+            time.sleep(min(30.0, max(5.0, self.sync_interval_s / 4)))
+            return False
 
     def _capture_snapshot(self) -> tuple[LiveStateSnapshot, list[object] | None, dict[str, object]]:
         snapshot = self.ws_client.snapshot().model_copy(

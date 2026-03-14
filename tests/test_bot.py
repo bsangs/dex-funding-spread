@@ -5,6 +5,7 @@ import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
 from rich.console import Console
 
 from dex_llm.bot import BotRuntime, StrategyState
@@ -179,6 +180,35 @@ def test_bot_runtime_pauses_entry_after_sticky_exchange_rejection() -> None:
 
     assert effective.playbook == Playbook.NO_TRADE
     assert "entry paused after exchange rejection" in effective.reason
+
+
+def test_bot_runtime_ensure_ws_connection_does_not_raise_on_reconnect_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = object.__new__(BotRuntime)
+    runtime.sync_interval_s = 120
+    events: list[tuple[str, int | None, str]] = []
+
+    class StubWsClient:
+        def connection_alive(self) -> bool:
+            return False
+
+        def reconnect(self) -> None:
+            raise RuntimeError("temporary 502")
+
+        def wait_until_public_ready(self, *, timeout_s: float) -> None:
+            raise AssertionError("should not reach wait_until_public_ready after failed reconnect")
+
+    runtime.ws_client = StubWsClient()
+    runtime._emit_runtime_error = lambda *, phase, cycle, exc: events.append(
+        (phase, cycle, str(exc))
+    )
+    monkeypatch.setattr("dex_llm.bot.time.sleep", lambda _: None)
+
+    connected = runtime._ensure_ws_connection(timeout_s=10.0, cycle=7)
+
+    assert connected is False
+    assert events == [("reconnect", 7, "temporary 502")]
 
 
 def test_bot_runtime_expires_resting_order_when_touch_window_passes() -> None:

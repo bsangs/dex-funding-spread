@@ -77,6 +77,7 @@ class CoinGlassHyperliquidLiqMapClient:
             payload,
             response.headers,
             request_headers=request_headers,
+            request_path=response.request.url.path if response.request is not None else self.liq_map_path,
         )
         snapshot = self.parse_liq_map_payload(symbol=symbol.upper(), payload=decoded)
         raw_path = self._write_raw_payload(symbol.upper(), decoded, prefix="coinglass-hl-liqmap")
@@ -178,27 +179,81 @@ class CoinGlassHyperliquidLiqMapClient:
         headers: Mapping[str, str],
         *,
         request_headers: Mapping[str, str] | None = None,
+        request_path: str | None = None,
     ) -> dict[str, object]:
         if not isinstance(payload, dict):
             raise ValueError("Unexpected liqMap response envelope")
         encrypted_data = payload.get("data")
         if not isinstance(encrypted_data, str):
             raise ValueError("liqMap response missing encrypted data")
-        time_header = headers.get("time")
-        if not time_header and request_headers is not None:
-            time_header = request_headers.get("cache-ts-v2")
         user_header = headers.get("user")
-        if not time_header or not user_header:
+        if not user_header:
             raise ValueError("liqMap response missing decryption headers")
-        seed_key = base64.b64encode(time_header.encode("utf-8")).decode("ascii")[:16]
-        user_key_gzip = self._aes_ecb_decrypt_base64(user_header, seed_key)
-        data_key = gzip.decompress(user_key_gzip).decode("utf-8")
-        decoded_gzip = self._aes_ecb_decrypt_base64(encrypted_data, data_key)
-        decoded = gzip.decompress(decoded_gzip).decode("utf-8")
-        parsed = json.loads(decoded)
-        if not isinstance(parsed, dict):
-            raise ValueError("Decoded liqMap payload is not a JSON object")
-        return parsed
+        response_version = str(headers.get("v", ""))
+        candidate_sources = self._candidate_seed_sources(
+            response_version=response_version,
+            headers=headers,
+            request_headers=request_headers,
+            request_path=request_path,
+        )
+        last_error: Exception | None = None
+        for source in candidate_sources:
+            try:
+                seed_key = base64.b64encode(source.encode("utf-8")).decode("ascii")[:16]
+                user_key_payload = self._aes_ecb_decrypt_base64(user_header, seed_key)
+                data_key = self._decode_user_key_payload(user_key_payload)
+                decoded_payload = self._aes_ecb_decrypt_base64(encrypted_data, data_key)
+                parsed = self._decode_json_payload(decoded_payload)
+                if not isinstance(parsed, dict):
+                    raise ValueError("Decoded liqMap payload is not a JSON object")
+                return parsed
+            except Exception as exc:
+                last_error = exc
+                continue
+        if last_error is None:
+            raise ValueError("liqMap response missing decryption headers")
+        raise last_error
+
+    def _candidate_seed_sources(
+        self,
+        *,
+        response_version: str,
+        headers: Mapping[str, str],
+        request_headers: Mapping[str, str] | None,
+        request_path: str | None,
+    ) -> list[str]:
+        candidates: list[str] = []
+        if response_version == "1" and request_path:
+            candidates.append(request_path)
+        time_header = headers.get("time")
+        if time_header:
+            candidates.append(time_header)
+        if request_headers is not None:
+            cache_ts = request_headers.get("cache-ts-v2")
+            if cache_ts:
+                candidates.append(cache_ts)
+        if request_path:
+            candidates.append(request_path)
+        deduped: list[str] = []
+        for candidate in candidates:
+            if candidate and candidate not in deduped:
+                deduped.append(candidate)
+        return deduped
+
+    @staticmethod
+    def _decode_user_key_payload(payload: bytes) -> str:
+        try:
+            return gzip.decompress(payload).decode("utf-8")
+        except Exception:
+            return payload.decode("utf-8")
+
+    @staticmethod
+    def _decode_json_payload(payload: bytes) -> object:
+        try:
+            decoded = gzip.decompress(payload).decode("utf-8")
+        except Exception:
+            decoded = payload.decode("utf-8")
+        return json.loads(decoded)
 
     def _aes_ecb_decrypt_base64(self, cipher_text_base64: str, key: str) -> bytes:
         cipher = AES.new(key.encode("utf-8"), AES.MODE_ECB)
