@@ -102,7 +102,7 @@ def render_router_prompt(
 
 
 def _heatmap_prompt_window(*, current_price: float, atr: float) -> float:
-    return max(atr * 8.0, current_price * 0.03, 25.0)
+    return max(atr * 8.0, current_price * 0.20, 150.0)
 
 
 def _filter_heatmap_levels(
